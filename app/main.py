@@ -256,8 +256,7 @@ def health() -> dict[str, str]:
 def board_page(request: Request, board_id: str, user: UserContext = Depends(authenticate_request)):
     conn = get_db()
     try:
-        if DEBUG and user.user_id == DEBUG_USER_ID:
-            create_board_if_missing(conn, board_id, user.user_id)
+        create_board_if_missing(conn, board_id, user.user_id)
         ensure_board_exists(conn, board_id)
         require_role(conn, board_id, user.user_id, "viewer")
     finally:
@@ -804,8 +803,7 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
     conn = get_db()
     try:
         try:
-            if DEBUG and user.user_id == DEBUG_USER_ID:
-                create_board_if_missing(conn, board_id, user.user_id)
+            create_board_if_missing(conn, board_id, user.user_id)
             ensure_board_exists(conn, board_id)
             board_role = require_role(conn, board_id, user.user_id, "viewer")
             canvas_json = _read_board_canvas(conn, board_id)

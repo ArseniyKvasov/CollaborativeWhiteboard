@@ -85,9 +85,16 @@ uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000
 Для production используется `.env.production`:
 
 - `DEBUG=False`
+- `HOST_PORT=18743`
 - `DATABASE_URL=/data/boards.db` (persist volume `whiteboard_data`)
 - `JWT_SECRET` задан
 - `SERVICE_API_KEY` — ключ сервисных admin-операций
+
+`HOST_PORT` задает внешний порт хоста для Docker Compose. Внутри контейнера приложение по-прежнему слушает `8000`.
+
+Recommended production host port:
+
+- `HOST_PORT=18743`
 
 ## JWT
 

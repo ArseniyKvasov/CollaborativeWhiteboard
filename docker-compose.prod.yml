@@ -9,7 +9,7 @@ services:
     env_file:
       - .env.production
     ports:
-      - "8000:8000"
+      - "${HOST_PORT:-8000}:8000"
     volumes:
       - whiteboard_data:/data
     restart: unless-stopped

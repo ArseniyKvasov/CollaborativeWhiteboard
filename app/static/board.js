@@ -123,6 +123,7 @@
     selection: true,
     preserveObjectStacking: true,
   });
+  fabricCanvas.uniformScaling = false;
 
   function setupObjectStyles() {
     fabricCanvas.selectionColor = "rgba(13,110,253,0.04)";
@@ -141,6 +142,7 @@
       touchCornerSize: 28,
       borderOpacityWhenMoving: 0.95,
       lockRotation: true,
+      lockUniScaling: false,
     });
   }
 
@@ -437,7 +439,82 @@
 
   function getObjectCornerRadius(obj) {
     if (obj.type === "image") return Number(obj.cornerRadius || 0);
+    if (obj.type === "path" && (obj.shapeKind === "triangle" || obj.shapeKind === "diamond")) {
+      return Number(obj.cornerRadius || 0);
+    }
     return Number(obj.cornerRadius || obj.rx || 0);
+  }
+
+  function isRoundedPolygonShape(obj) {
+    return !!(obj && obj.type === "path" && (obj.shapeKind === "triangle" || obj.shapeKind === "diamond"));
+  }
+
+  function isCornerRadiusSupportedObject(obj) {
+    return !!(obj && (obj.type === "rect" || obj.type === "image" || isRoundedPolygonShape(obj)));
+  }
+
+  function roundedPolygonPathData(points, radius) {
+    if (!Array.isArray(points) || points.length < 3) return "";
+    const safeRadius = Math.max(0, Number(radius) || 0);
+    if (safeRadius <= 0) {
+      return `M ${points.map((p) => `${p.x} ${p.y}`).join(" L ")} Z`;
+    }
+
+    const corners = points.map((curr, i) => {
+      const prev = points[(i - 1 + points.length) % points.length];
+      const next = points[(i + 1) % points.length];
+      const vPrev = { x: prev.x - curr.x, y: prev.y - curr.y };
+      const vNext = { x: next.x - curr.x, y: next.y - curr.y };
+      const lenPrev = Math.hypot(vPrev.x, vPrev.y) || 1;
+      const lenNext = Math.hypot(vNext.x, vNext.y) || 1;
+      const cut = Math.min(safeRadius, lenPrev / 2, lenNext / 2);
+      const p1 = { x: curr.x + (vPrev.x / lenPrev) * cut, y: curr.y + (vPrev.y / lenPrev) * cut };
+      const p2 = { x: curr.x + (vNext.x / lenNext) * cut, y: curr.y + (vNext.y / lenNext) * cut };
+      return { curr, p1, p2 };
+    });
+
+    let d = `M ${corners[0].p1.x} ${corners[0].p1.y}`;
+    for (let i = 0; i < corners.length; i += 1) {
+      const c = corners[i];
+      const next = corners[(i + 1) % corners.length];
+      d += ` Q ${c.curr.x} ${c.curr.y} ${c.p2.x} ${c.p2.y}`;
+      d += ` L ${next.p1.x} ${next.p1.y}`;
+    }
+    d += " Z";
+    return d;
+  }
+
+  function createRoundedPolygonShape(type, x, y, width, height, strokeW, radius = 0) {
+    const points = type === "triangle"
+      ? [
+          { x: width / 2, y: 0 },
+          { x: width, y: height },
+          { x: 0, y: height },
+        ]
+      : [
+          { x: width / 2, y: 0 },
+          { x: width, y: height / 2 },
+          { x: width / 2, y: height },
+          { x: 0, y: height / 2 },
+        ];
+
+    const maxR = Math.min(width, height) / 3;
+    const safeRadius = Math.max(0, Math.min(maxR, Number(radius) || 0));
+    const path = new fabric.Path(roundedPolygonPathData(points, safeRadius), {
+      left: x,
+      top: y,
+      originX: "left",
+      originY: "top",
+      fill: "transparent",
+      stroke: currentColor,
+      strokeWidth: strokeW,
+      strokeLineCap: "round",
+      strokeLineJoin: "round",
+      objectCaching: false,
+    });
+    path.shapeKind = type;
+    path.cornerRadius = safeRadius;
+    return path;
   }
 
   function applyImageCornerRadius(img, radiusPx) {
@@ -478,6 +555,41 @@
       obj.set({ rx: safe, ry: safe });
     } else if (obj.type === "image") {
       applyImageCornerRadius(obj, radius);
+    } else if (isRoundedPolygonShape(obj)) {
+      const width = Math.max(1, Number(obj.width || obj.getScaledWidth() || 1));
+      const height = Math.max(1, Number(obj.height || obj.getScaledHeight() || 1));
+      const replacement = createRoundedPolygonShape(
+        obj.shapeKind,
+        obj.left || 0,
+        obj.top || 0,
+        width,
+        height,
+        Number(obj.strokeWidth || 2),
+        radius,
+      );
+      replacement.set({
+        scaleX: obj.scaleX || 1,
+        scaleY: obj.scaleY || 1,
+        angle: obj.angle || 0,
+        flipX: !!obj.flipX,
+        flipY: !!obj.flipY,
+        originX: obj.originX || "left",
+        originY: obj.originY || "top",
+        obj_id: obj.obj_id,
+        author_id: obj.author_id,
+        author_name: obj.author_name,
+      });
+      const canvas = obj.canvas;
+      const active = fabricCanvas.getActiveObject();
+      const wasSelected = active && captureActiveSelectionIds().includes(obj.obj_id);
+      if (canvas) {
+        canvas.remove(obj);
+        canvas.add(replacement);
+        if (wasSelected) {
+          fabricCanvas.setActiveObject(replacement);
+          applySelectionStyles();
+        }
+      }
     }
   }
 
@@ -508,7 +620,7 @@
 
   function updateStylePanelVisibility() {
     if (!stylePanel || !cornerRadiusEl) return;
-    const objs = getSelectionObjects().filter((o) => o.type === "rect" || o.type === "image");
+    const objs = getSelectionObjects().filter((o) => isCornerRadiusSupportedObject(o));
     if (!objs.length) {
       stylePanel.classList.remove("active");
       updateUndoRedoDockVisibility();
@@ -523,7 +635,7 @@
   function applyCornerRadiusToSelection(value) {
     const radius = Number(value);
     if (!Number.isFinite(radius)) return;
-    const objs = getSelectionObjects().filter((o) => o.type === "rect" || o.type === "image");
+    const objs = getSelectionObjects().filter((o) => isCornerRadiusSupportedObject(o));
     if (!objs.length) return;
     objs.forEach((obj) => {
       setObjectCornerRadius(obj, radius);
@@ -573,7 +685,7 @@
 
   function serializeObject(obj) {
     ensureObjMeta(obj);
-    return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius"]);
+    return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius", "shapeKind"]);
   }
 
   function serializeAbsoluteObject(obj) {
@@ -1091,38 +1203,12 @@
     }
 
     if (type === "triangle") {
-      const tri = new fabric.Triangle({
-        left: x,
-        top: y,
-        width,
-        height,
-        fill: "transparent",
-        stroke: currentColor,
-        strokeWidth: strokeW,
-        strokeLineCap: "round",
-        strokeLineJoin: "round",
-      });
+      const tri = createRoundedPolygonShape(type, x, y, width, height, strokeW, 0);
       ensureObjMeta(tri);
       return tri;
     }
 
-    const diamond = new fabric.Polygon(
-      [
-        { x: width / 2, y: 0 },
-        { x: width, y: height / 2 },
-        { x: width / 2, y: height },
-        { x: 0, y: height / 2 },
-      ],
-      {
-        left: x,
-        top: y,
-        fill: "transparent",
-        stroke: currentColor,
-        strokeWidth: strokeW,
-        strokeLineCap: "round",
-        strokeLineJoin: "round",
-      },
-    );
+    const diamond = createRoundedPolygonShape("diamond", x, y, width, height, strokeW, 0);
     ensureObjMeta(diamond);
     return diamond;
   }

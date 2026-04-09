@@ -2,6 +2,12 @@
 
 Collaborative infinite whiteboard built with FastAPI, Fabric.js and Socket.IO. The project is designed for iframe embedding into an external platform, JWT-based access control, realtime multi-user editing, and production deployment behind Nginx.
 
+![Desktop Board](docs/images/whiteboard-desktop.png)
+
+![Mobile Board](docs/images/whiteboard-mobile.png)
+
+![Toolbar And Shapes](docs/images/whiteboard-toolbar.png)
+
 ## Features
 
 - Infinite canvas with pan and zoom

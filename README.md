@@ -49,7 +49,7 @@ docker compose up --build
 2. Запустите:
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 ```
 
 3. Проверка health:
@@ -61,7 +61,7 @@ curl http://localhost:8000/health
 Остановка:
 
 ```bash
-docker compose -f docker-compose.prod.yml down
+docker compose --env-file .env.production -f docker-compose.prod.yml down
 ```
 
 ### Local Run
@@ -80,7 +80,6 @@ uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000
 - `DATABASE_URL` — путь к SQLite базе (например `app/boards.db`)
 - `CORS_ORIGINS` — список origin через запятую
 - `DEBUG` — dev-режим; при `True` JWT не обязателен
-- `DBUG` — алиас для `DEBUG` (поддерживается для совместимости)
 
 Для production используется `.env.production`:
 

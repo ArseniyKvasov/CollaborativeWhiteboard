@@ -25,7 +25,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", str(BASE_DIR / "boards.db"))
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
-DEBUG_RAW = os.getenv("DEBUG", os.getenv("DBUG", "false"))
+DEBUG_RAW = os.getenv("DEBUG", "false")
 DEBUG = str(DEBUG_RAW).strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_USER_ID = os.getenv("DEBUG_USER_ID", "debug-user")
 
@@ -44,6 +44,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+PENDING_OWNER_ID = "__pending_moderator__"
 
 
 @dataclass
@@ -247,6 +248,78 @@ def create_board_if_missing(conn: sqlite3.Connection, board_id: str, owner_id: s
     return ensure_board_exists(conn, board_id)
 
 
+def _target_board_role(user: UserContext) -> str:
+    return "owner" if user.role == "moderator" else "editor"
+
+
+def ensure_user_board_access(conn: sqlite3.Connection, board_id: str, user: UserContext) -> str:
+    row = board_row(conn, board_id)
+    ts = now_iso()
+    target_role = _target_board_role(user)
+
+    if not row:
+        owner_id = user.user_id if target_role == "owner" else PENDING_OWNER_ID
+        conn.execute(
+            "INSERT INTO boards (board_id, canvas_json, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (board_id, json.dumps(default_canvas_state(), ensure_ascii=False), owner_id, ts, ts),
+        )
+        conn.execute(
+            """
+            INSERT INTO board_members (board_id, user_id, role, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(board_id, user_id)
+            DO UPDATE SET role = excluded.role
+            """,
+            (board_id, user.user_id, target_role, ts),
+        )
+        conn.commit()
+        return target_role
+
+    if target_role == "owner":
+        previous_owner_id = str(row["owner_id"] or "")
+        if previous_owner_id and previous_owner_id not in {user.user_id, PENDING_OWNER_ID}:
+            conn.execute(
+                """
+                INSERT INTO board_members (board_id, user_id, role, created_at)
+                VALUES (?, ?, 'editor', ?)
+                ON CONFLICT(board_id, user_id)
+                DO UPDATE SET role = 'editor'
+                """,
+                (board_id, previous_owner_id, ts),
+            )
+        conn.execute(
+            "UPDATE board_members SET role = 'editor' WHERE board_id = ? AND user_id != ? AND role = 'owner'",
+            (board_id, user.user_id),
+        )
+        conn.execute(
+            "UPDATE boards SET owner_id = ?, updated_at = ? WHERE board_id = ?",
+            (user.user_id, ts, board_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO board_members (board_id, user_id, role, created_at)
+            VALUES (?, ?, 'owner', ?)
+            ON CONFLICT(board_id, user_id)
+            DO UPDATE SET role = 'owner'
+            """,
+            (board_id, user.user_id, ts),
+        )
+        conn.commit()
+        return "owner"
+
+    conn.execute(
+        """
+        INSERT INTO board_members (board_id, user_id, role, created_at)
+        VALUES (?, ?, 'editor', ?)
+        ON CONFLICT(board_id, user_id)
+        DO UPDATE SET role = CASE WHEN board_members.role = 'owner' THEN board_members.role ELSE 'editor' END
+        """,
+        (board_id, user.user_id, ts),
+    )
+    conn.commit()
+    return "editor"
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -256,7 +329,7 @@ def health() -> dict[str, str]:
 def board_page(request: Request, board_id: str, user: UserContext = Depends(authenticate_request)):
     conn = get_db()
     try:
-        create_board_if_missing(conn, board_id, user.user_id)
+        ensure_user_board_access(conn, board_id, user)
         ensure_board_exists(conn, board_id)
         require_role(conn, board_id, user.user_id, "viewer")
     finally:
@@ -279,6 +352,7 @@ def board_page(request: Request, board_id: str, user: UserContext = Depends(auth
 def get_board_state(board_id: str, user: UserContext = Depends(authenticate_request)):
     conn = get_db()
     try:
+        ensure_user_board_access(conn, board_id, user)
         row = ensure_board_exists(conn, board_id)
         role = require_role(conn, board_id, user.user_id, "viewer")
         return {
@@ -298,6 +372,7 @@ def get_board_state(board_id: str, user: UserContext = Depends(authenticate_requ
 def save_board_state(board_id: str, body: SaveBoardRequest, user: UserContext = Depends(authenticate_request)):
     conn = get_db()
     try:
+        ensure_user_board_access(conn, board_id, user)
         ensure_board_exists(conn, board_id)
         require_role(conn, board_id, user.user_id, "editor")
         updated_at = now_iso()
@@ -328,25 +403,14 @@ def delete_board(board_id: str, user: UserContext = Depends(authenticate_request
 @app.post("/api/board")
 def create_board(body: CreateBoardRequest, user: UserContext = Depends(authenticate_request)):
     board_id = body.board_id or uuid.uuid4().hex[:12]
-    created_at = now_iso()
-    canvas = json.dumps(default_canvas_state(), ensure_ascii=False)
-
     conn = get_db()
     try:
         exists = board_row(conn, board_id)
         if exists:
             raise HTTPException(status_code=409, detail="Board already exists")
-
-        conn.execute(
-            "INSERT INTO boards (board_id, canvas_json, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (board_id, canvas, user.user_id, created_at, created_at),
-        )
-        conn.execute(
-            "INSERT INTO board_members (board_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
-            (board_id, user.user_id, created_at),
-        )
-        conn.commit()
-        return {"board_id": board_id, "owner_id": user.user_id, "created_at": created_at}
+        role = ensure_user_board_access(conn, board_id, user)
+        row = ensure_board_exists(conn, board_id)
+        return {"board_id": board_id, "owner_id": row["owner_id"], "created_at": row["created_at"], "role": role}
     finally:
         conn.close()
 
@@ -803,7 +867,7 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
     conn = get_db()
     try:
         try:
-            create_board_if_missing(conn, board_id, user.user_id)
+            ensure_user_board_access(conn, board_id, user)
             ensure_board_exists(conn, board_id)
             board_role = require_role(conn, board_id, user.user_id, "viewer")
             canvas_json = _read_board_canvas(conn, board_id)

@@ -13,6 +13,7 @@
   const textToolBtn = document.getElementById("textTool");
   const imageToolBtn = document.getElementById("imageTool");
   const mobileImageBtn = document.getElementById("mobileImageBtn");
+  const mobileHandBtn = document.getElementById("mobileHandBtn");
   const undoBtn = document.getElementById("undoBtn");
   const redoBtn = document.getElementById("redoBtn");
   const undoRedoDock = document.getElementById("undoRedoDock");
@@ -289,6 +290,17 @@
     document.querySelectorAll(".shape-btn[data-shape]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.shape === currentShapeType);
     });
+    if (shapeToolBtn) {
+      const shapeIconByType = {
+        rect: '<span class="bi-local" style="--icon:url(\'/static/icons/square.svg\')"></span>',
+        ellipse: '<span class="bi-local" style="--icon:url(\'/static/icons/circle.svg\')"></span>',
+        line: '<span class="bi-local" style="--icon:url(\'/static/icons/slash-lg.svg\')"></span>',
+        arrow: '<span class="shape-arrow-glyph">↗</span>',
+        triangle: '<span class="bi-local" style="--icon:url(\'/static/icons/triangle.svg\')"></span>',
+        diamond: '<span class="bi-local" style="--icon:url(\'/static/icons/diamond.svg\')"></span>',
+      };
+      shapeToolBtn.innerHTML = shapeIconByType[currentShapeType] || shapeIconByType.rect;
+    }
   }
 
   function updateUndoRedoDockVisibility() {
@@ -439,82 +451,11 @@
 
   function getObjectCornerRadius(obj) {
     if (obj.type === "image") return Number(obj.cornerRadius || 0);
-    if (obj.type === "path" && (obj.shapeKind === "triangle" || obj.shapeKind === "diamond")) {
-      return Number(obj.cornerRadius || 0);
-    }
     return Number(obj.cornerRadius || obj.rx || 0);
   }
 
-  function isRoundedPolygonShape(obj) {
-    return !!(obj && obj.type === "path" && (obj.shapeKind === "triangle" || obj.shapeKind === "diamond"));
-  }
-
   function isCornerRadiusSupportedObject(obj) {
-    return !!(obj && (obj.type === "rect" || obj.type === "image" || isRoundedPolygonShape(obj)));
-  }
-
-  function roundedPolygonPathData(points, radius) {
-    if (!Array.isArray(points) || points.length < 3) return "";
-    const safeRadius = Math.max(0, Number(radius) || 0);
-    if (safeRadius <= 0) {
-      return `M ${points.map((p) => `${p.x} ${p.y}`).join(" L ")} Z`;
-    }
-
-    const corners = points.map((curr, i) => {
-      const prev = points[(i - 1 + points.length) % points.length];
-      const next = points[(i + 1) % points.length];
-      const vPrev = { x: prev.x - curr.x, y: prev.y - curr.y };
-      const vNext = { x: next.x - curr.x, y: next.y - curr.y };
-      const lenPrev = Math.hypot(vPrev.x, vPrev.y) || 1;
-      const lenNext = Math.hypot(vNext.x, vNext.y) || 1;
-      const cut = Math.min(safeRadius, lenPrev / 2, lenNext / 2);
-      const p1 = { x: curr.x + (vPrev.x / lenPrev) * cut, y: curr.y + (vPrev.y / lenPrev) * cut };
-      const p2 = { x: curr.x + (vNext.x / lenNext) * cut, y: curr.y + (vNext.y / lenNext) * cut };
-      return { curr, p1, p2 };
-    });
-
-    let d = `M ${corners[0].p1.x} ${corners[0].p1.y}`;
-    for (let i = 0; i < corners.length; i += 1) {
-      const c = corners[i];
-      const next = corners[(i + 1) % corners.length];
-      d += ` Q ${c.curr.x} ${c.curr.y} ${c.p2.x} ${c.p2.y}`;
-      d += ` L ${next.p1.x} ${next.p1.y}`;
-    }
-    d += " Z";
-    return d;
-  }
-
-  function createRoundedPolygonShape(type, x, y, width, height, strokeW, radius = 0) {
-    const points = type === "triangle"
-      ? [
-          { x: width / 2, y: 0 },
-          { x: width, y: height },
-          { x: 0, y: height },
-        ]
-      : [
-          { x: width / 2, y: 0 },
-          { x: width, y: height / 2 },
-          { x: width / 2, y: height },
-          { x: 0, y: height / 2 },
-        ];
-
-    const maxR = Math.min(width, height) / 3;
-    const safeRadius = Math.max(0, Math.min(maxR, Number(radius) || 0));
-    const path = new fabric.Path(roundedPolygonPathData(points, safeRadius), {
-      left: x,
-      top: y,
-      originX: "left",
-      originY: "top",
-      fill: "transparent",
-      stroke: currentColor,
-      strokeWidth: strokeW,
-      strokeLineCap: "round",
-      strokeLineJoin: "round",
-      objectCaching: false,
-    });
-    path.shapeKind = type;
-    path.cornerRadius = safeRadius;
-    return path;
+    return !!(obj && (obj.type === "rect" || obj.type === "image"));
   }
 
   function applyImageCornerRadius(img, radiusPx) {
@@ -555,41 +496,6 @@
       obj.set({ rx: safe, ry: safe });
     } else if (obj.type === "image") {
       applyImageCornerRadius(obj, radius);
-    } else if (isRoundedPolygonShape(obj)) {
-      const width = Math.max(1, Number(obj.width || obj.getScaledWidth() || 1));
-      const height = Math.max(1, Number(obj.height || obj.getScaledHeight() || 1));
-      const replacement = createRoundedPolygonShape(
-        obj.shapeKind,
-        obj.left || 0,
-        obj.top || 0,
-        width,
-        height,
-        Number(obj.strokeWidth || 2),
-        radius,
-      );
-      replacement.set({
-        scaleX: obj.scaleX || 1,
-        scaleY: obj.scaleY || 1,
-        angle: obj.angle || 0,
-        flipX: !!obj.flipX,
-        flipY: !!obj.flipY,
-        originX: obj.originX || "left",
-        originY: obj.originY || "top",
-        obj_id: obj.obj_id,
-        author_id: obj.author_id,
-        author_name: obj.author_name,
-      });
-      const canvas = obj.canvas;
-      const active = fabricCanvas.getActiveObject();
-      const wasSelected = active && captureActiveSelectionIds().includes(obj.obj_id);
-      if (canvas) {
-        canvas.remove(obj);
-        canvas.add(replacement);
-        if (wasSelected) {
-          fabricCanvas.setActiveObject(replacement);
-          applySelectionStyles();
-        }
-      }
     }
   }
 
@@ -1203,12 +1109,42 @@
     }
 
     if (type === "triangle") {
-      const tri = createRoundedPolygonShape(type, x, y, width, height, strokeW, 0);
+      const tri = new fabric.Triangle({
+        left: x,
+        top: y,
+        width,
+        height,
+        fill: "transparent",
+        stroke: currentColor,
+        strokeWidth: strokeW,
+        strokeLineCap: "round",
+        strokeLineJoin: "round",
+        originX: "left",
+        originY: "top",
+      });
       ensureObjMeta(tri);
       return tri;
     }
 
-    const diamond = createRoundedPolygonShape("diamond", x, y, width, height, strokeW, 0);
+    const diamond = new fabric.Polygon(
+      [
+        { x: width / 2, y: 0 },
+        { x: width, y: height / 2 },
+        { x: width / 2, y: height },
+        { x: 0, y: height / 2 },
+      ],
+      {
+        left: x,
+        top: y,
+        fill: "transparent",
+        stroke: currentColor,
+        strokeWidth: strokeW,
+        strokeLineCap: "round",
+        strokeLineJoin: "round",
+        originX: "left",
+        originY: "top",
+      },
+    );
     ensureObjMeta(diamond);
     return diamond;
   }
@@ -1225,6 +1161,8 @@
     const panByTool = currentTool === "hand" && evt.button === 0;
 
     if (panByModifier || panByTool) {
+      if (typeof evt.preventDefault === "function") evt.preventDefault();
+      if (typeof evt.stopPropagation === "function") evt.stopPropagation();
       panMode = true;
       panLast = { x: evt.clientX, y: evt.clientY };
       fabricCanvas.defaultCursor = "grabbing";
@@ -1283,6 +1221,7 @@
     const world = worldFromScreen(evt.offsetX, evt.offsetY);
 
     if (panMode) {
+      if (typeof evt.preventDefault === "function") evt.preventDefault();
       const v = fabricCanvas.viewportTransform;
       const dx = evt.clientX - panLast.x;
       const dy = evt.clientY - panLast.y;
@@ -1342,8 +1281,20 @@
   fabricCanvas.on("mouse:up", onMouseUp);
 
   fabricCanvas.on("mouse:wheel", (opt) => {
-    const factor = opt.e.deltaY > 0 ? 0.94 : 1.065;
-    zoomByFactor(factor, opt.e.offsetX, opt.e.offsetY);
+    const evt = opt.e;
+    const isZoomGesture = evt.ctrlKey || evt.metaKey;
+    if (isZoomGesture) {
+      const factor = evt.deltaY > 0 ? 0.94 : 1.065;
+      zoomByFactor(factor, evt.offsetX, evt.offsetY);
+    } else {
+      const v = fabricCanvas.viewportTransform;
+      v[4] -= evt.deltaX;
+      v[5] -= evt.deltaY;
+      fabricCanvas.requestRenderAll();
+      renderRemoteCursors();
+      drawMiniMap();
+      updateGridPosition();
+    }
     opt.e.preventDefault();
     opt.e.stopPropagation();
   });
@@ -1558,6 +1509,12 @@
       hiddenImageInput.click();
     });
   }
+  if (mobileHandBtn) {
+    mobileHandBtn.addEventListener("click", () => {
+      hidePanels();
+      setTool("hand");
+    });
+  }
   if (mobileRotateBtn) {
     mobileRotateBtn.addEventListener("click", () => {
       if (rotateBtn) rotateBtn.click();
@@ -1644,6 +1601,18 @@
   document.addEventListener("click", (e) => {
     const inside = e.target.closest("#toolbar") || e.target.closest(".floating-panel");
     if (!inside) hidePanels();
+  });
+
+  boardWrap.addEventListener("mousedown", (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+    }
+  });
+
+  boardWrap.addEventListener("auxclick", (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+    }
   });
 
   boardWrap.addEventListener("touchstart", (e) => {

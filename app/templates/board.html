@@ -56,6 +56,13 @@
       z-index: 20;
     }
 
+    .selection-lock-btn {
+      position: fixed;
+      z-index: 36;
+      display: none;
+      box-shadow: 0 10px 24px rgba(17, 24, 39, 0.18);
+    }
+
     .remote-cursor {
       position: absolute;
       transform: translate(-2px, -2px);
@@ -399,6 +406,7 @@
     <canvas id="canvas"></canvas>
     <div id="cursorLayer"></div>
   </div>
+  <button class="tool-btn selection-lock-btn" id="selectionLockBtn" title="Блокировать выделение" type="button"><span class="bi-local" style="--icon:url('/static/icons/lock.svg')"></span></button>
 
   <div class="floating-toolbar" id="toolbar">
     <button class="tool-btn active" data-tool="select" title="Курсор"><span class="bi-local" style="--icon:url('/static/icons/cursor.svg')"></span></button>
@@ -470,6 +478,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260409-18"></script>
+  <script src="/static/board.js?v=20260410-10"></script>
 </body>
 </html>

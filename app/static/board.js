@@ -13,6 +13,7 @@
   const textToolBtn = document.getElementById("textTool");
   const imageToolBtn = document.getElementById("imageTool");
   const mobileImageBtn = document.getElementById("mobileImageBtn");
+  const selectionLockBtn = document.getElementById("selectionLockBtn");
   const mobileHandBtn = document.getElementById("mobileHandBtn");
   const undoBtn = document.getElementById("undoBtn");
   const redoBtn = document.getElementById("redoBtn");
@@ -53,6 +54,8 @@
   const GRID_WORLD_SIZE = 24;
   const GRID_BG_IMAGE =
     "linear-gradient(90deg, rgba(17,24,39,0.045) 1px, transparent 1px), linear-gradient(rgba(17,24,39,0.045) 1px, transparent 1px)";
+  const LOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/lock-outline.svg\')"></span>';
+  const UNLOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/unlock-outline.svg\')"></span>';
 
   let currentTool = "select";
   let currentShapeType = "rect";
@@ -84,6 +87,8 @@
   let pinchCenter = null;
 
   let skipNextTextCreate = false;
+  let focusedLockedObject = null;
+  let lockButtonAnchorKey = "";
 
   let lastCursorSentAt = 0;
   const remoteCursors = new Map();
@@ -168,6 +173,191 @@
     if (mobileRotateBtn) mobileRotateBtn.disabled = disabled;
   }
 
+  function isObjectLocked(obj) {
+    return !!(obj && obj.wb_locked);
+  }
+
+  function setObjectLocked(obj, locked) {
+    if (!obj || typeof obj.set !== "function") return;
+    const next = !!locked;
+    obj.wb_locked = next;
+    obj.set({
+      lockMovementX: next,
+      lockMovementY: next,
+      lockScalingX: next,
+      lockScalingY: next,
+      lockSkewingX: next,
+      lockSkewingY: next,
+      lockRotation: true,
+      editable: !next,
+      hoverCursor: next ? "not-allowed" : "move",
+    });
+    if (next) {
+      obj.selectable = false;
+      obj.hasControls = false;
+      obj.hasBorders = false;
+    } else {
+      obj.hasControls = true;
+      obj.hasBorders = true;
+    }
+    obj.setCoords();
+  }
+
+  function syncLockStates() {
+    fabricCanvas.forEachObject((obj) => setObjectLocked(obj, isObjectLocked(obj)));
+  }
+
+  function isObjectOnCanvas(obj) {
+    return !!(obj && obj.canvas === fabricCanvas);
+  }
+
+  function isLockEligibleObject(obj) {
+    return !!(obj && String(obj.type || "").toLowerCase() === "image");
+  }
+
+  function isTextObject(obj) {
+    const t = String(obj && obj.type || "").toLowerCase();
+    return t === "i-text" || t === "text" || t === "textbox";
+  }
+
+  function isNoMirrorObject(obj) {
+    if (!obj) return false;
+    return isTextObject(obj) || String(obj.type || "").toLowerCase() === "image";
+  }
+
+  function enforceNoMirrorObject(obj) {
+    if (!obj || !isNoMirrorObject(obj) || typeof obj.set !== "function") return false;
+    const nextScaleX = Math.max(0.001, Math.abs(Number(obj.scaleX || 1)));
+    const nextScaleY = Math.max(0.001, Math.abs(Number(obj.scaleY || 1)));
+    const mustDisableFlip = !!obj.flipX || !!obj.flipY;
+    const mustLockFlipScale = obj.lockScalingFlip !== true;
+    const changed =
+      !Number.isFinite(Number(obj.scaleX)) || !Number.isFinite(Number(obj.scaleY))
+      || nextScaleX !== Number(obj.scaleX || 1)
+      || nextScaleY !== Number(obj.scaleY || 1)
+      || mustDisableFlip
+      || mustLockFlipScale;
+    if (!changed) return false;
+    obj.set({
+      scaleX: nextScaleX,
+      scaleY: nextScaleY,
+      flipX: false,
+      flipY: false,
+      lockScalingFlip: true,
+    });
+    obj.setCoords();
+    return true;
+  }
+
+  function enforceNoMirrorInTarget(target) {
+    if (!target) return false;
+    if (isMultiSelectionObject(target) && typeof target.getObjects === "function") {
+      let changedAny = false;
+      target.getObjects().forEach((obj) => {
+        if (enforceNoMirrorObject(obj)) changedAny = true;
+      });
+      return changedAny;
+    }
+    return enforceNoMirrorObject(target);
+  }
+
+  function resolveLockTargetState() {
+    const active = fabricCanvas.getActiveObject();
+    const selectedObjects = active ? getSelectionObjects() : [];
+    if (active && selectedObjects.length && selectedObjects.every((obj) => isLockEligibleObject(obj))) {
+      return {
+        objects: selectedObjects,
+        anchor: active,
+      };
+    }
+
+    if (
+      focusedLockedObject
+      && isObjectOnCanvas(focusedLockedObject)
+      && isObjectLocked(focusedLockedObject)
+      && isLockEligibleObject(focusedLockedObject)
+    ) {
+      return {
+        objects: [focusedLockedObject],
+        anchor: focusedLockedObject,
+      };
+    }
+
+    return { objects: [], anchor: null };
+  }
+
+  function placeSelectionLockButton(anchor) {
+    if (!selectionLockBtn || !anchor || typeof anchor.getBoundingRect !== "function") return;
+    const bounds = anchor.getBoundingRect();
+    if (!bounds) return;
+    const topCenter = screenFromWorld(bounds.left + bounds.width / 2, bounds.top);
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const btnW = selectionLockBtn.offsetWidth || 38;
+    const btnH = selectionLockBtn.offsetHeight || 38;
+    const margin = 10;
+    const left = Math.max(
+      8,
+      Math.min(window.innerWidth - btnW - 8, canvasRect.left + topCenter.x - btnW / 2),
+    );
+    const top = Math.max(
+      8,
+      Math.min(window.innerHeight - btnH - 8, canvasRect.top + topCenter.y - btnH - margin),
+    );
+    selectionLockBtn.style.left = `${left}px`;
+    selectionLockBtn.style.top = `${top}px`;
+  }
+
+  function updateLockButtonsState() {
+    const selectMode = canEdit && currentTool === "select";
+    const { objects: selectedObjects, anchor } = resolveLockTargetState();
+    const hasSingleObject = selectedObjects.length === 1;
+    const allLocked = hasSingleObject && selectedObjects.every((obj) => isObjectLocked(obj));
+    const title = allLocked ? "Разблокировать выделение" : "Блокировать выделение";
+    if (selectionLockBtn) {
+      selectionLockBtn.style.display = selectMode && hasSingleObject ? "inline-flex" : "none";
+      selectionLockBtn.disabled = !selectMode || !hasSingleObject;
+      selectionLockBtn.title = title;
+      selectionLockBtn.classList.toggle("active", allLocked);
+      selectionLockBtn.innerHTML = allLocked ? LOCK_ICON_HTML : UNLOCK_ICON_HTML;
+      if (selectMode && hasSingleObject && anchor) {
+        const only = selectedObjects[0];
+        const fallbackIndex = fabricCanvas.getObjects().indexOf(only);
+        const nextAnchorKey = String(only?.obj_id || only?.id || `idx:${fallbackIndex}`);
+        if (nextAnchorKey !== lockButtonAnchorKey) {
+          placeSelectionLockButton(anchor);
+          lockButtonAnchorKey = nextAnchorKey;
+        }
+      } else {
+        lockButtonAnchorKey = "";
+      }
+    }
+  }
+
+  function toggleSelectionLock() {
+    const selectedObjects = resolveLockTargetState().objects;
+    if (!canEdit || selectedObjects.length !== 1 || !isLockEligibleObject(selectedObjects[0])) return;
+    const allLocked = selectedObjects.every((obj) => isObjectLocked(obj));
+    const nextLocked = !allLocked;
+    selectedObjects.forEach((obj) => {
+      setObjectLocked(obj, nextLocked);
+      enqueueUpdateOp(obj);
+    });
+    if (nextLocked) {
+      focusedLockedObject = selectedObjects.length === 1 ? selectedObjects[0] : null;
+      fabricCanvas.discardActiveObject();
+    } else if (selectedObjects.length === 1 && isObjectOnCanvas(selectedObjects[0])) {
+      focusedLockedObject = null;
+      fabricCanvas.setActiveObject(selectedObjects[0]);
+      applySelectionStyles();
+    } else {
+      focusedLockedObject = null;
+    }
+    syncObjectInteractivity();
+    updateStylePanelVisibility();
+    updateLockButtonsState();
+    fabricCanvas.requestRenderAll();
+  }
+
   function applyEditPermissions() {
     document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
       const t = btn.dataset.tool;
@@ -177,6 +367,7 @@
     if (mobileImageBtn) mobileImageBtn.disabled = !canEdit;
     if (mobileBgBtn) mobileBgBtn.disabled = false;
     syncObjectInteractivity();
+    updateLockButtonsState();
     updateRotateButtonState();
   }
 
@@ -314,15 +505,18 @@
     const eraseMode = canEdit && currentTool === "eraser";
 
     fabricCanvas.forEachObject((obj) => {
-      obj.selectable = selectMode;
-      obj.evented = selectMode || eraseMode;
+      const locked = isObjectLocked(obj);
+      obj.selectable = selectMode && !locked;
+      obj.evented = locked ? selectMode : (selectMode || eraseMode);
     });
 
     if (!selectMode) {
+      focusedLockedObject = null;
       fabricCanvas.discardActiveObject();
     }
 
     updateRotateButtonState();
+    updateLockButtonsState();
     fabricCanvas.requestRenderAll();
   }
 
@@ -396,21 +590,27 @@
     const z = fabricCanvas.getZoom();
     v[4] = fabricCanvas.getWidth() / 2 - wx * z;
     v[5] = fabricCanvas.getHeight() / 2 - wy * z;
+    const active = fabricCanvas.getActiveObject();
+    if (active && typeof active.setCoords === "function") active.setCoords();
     fabricCanvas.requestRenderAll();
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
+    updateLockButtonsState();
   }
 
   function resetView() {
     const w = fabricCanvas.getWidth();
     const h = fabricCanvas.getHeight();
     fabricCanvas.setViewportTransform([1, 0, 0, 1, w / 2, h / 2]);
+    const active = fabricCanvas.getActiveObject();
+    if (active && typeof active.setCoords === "function") active.setCoords();
     fabricCanvas.requestRenderAll();
     setZoomLabel();
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
+    updateLockButtonsState();
   }
 
   function zoomByFactor(factor, centerX, centerY) {
@@ -418,10 +618,13 @@
     zoom = Math.max(0.08, Math.min(24, zoom));
     const p = new fabric.Point(centerX, centerY);
     fabricCanvas.zoomToPoint(p, zoom);
+    const active = fabricCanvas.getActiveObject();
+    if (active && typeof active.setCoords === "function") active.setCoords();
     setZoomLabel();
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
+    updateLockButtonsState();
   }
 
   function updateGridPosition() {
@@ -504,6 +707,12 @@
       if (obj.type === "image") {
         applyImageCornerRadius(obj, getObjectCornerRadius(obj));
       }
+    });
+  }
+
+  function syncNoMirrorObjects() {
+    fabricCanvas.forEachObject((obj) => {
+      enforceNoMirrorObject(obj);
     });
   }
 
@@ -591,7 +800,7 @@
 
   function serializeObject(obj) {
     ensureObjMeta(obj);
-    return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius", "shapeKind"]);
+    return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius", "shapeKind", "wb_locked"]);
   }
 
   function serializeAbsoluteObject(obj) {
@@ -726,7 +935,9 @@
     Promise.resolve(fabricCanvas.loadFromJSON(canvasJson)).then(() => {
       isRemoteApplying = false;
       ensureCanvasTransparentBackground();
+      syncLockStates();
       syncRoundedImages();
+      syncNoMirrorObjects();
       syncObjectInteractivity();
       restoreSelectionByIds(selectedIds);
       updateStylePanelVisibility();
@@ -771,6 +982,8 @@
       }
       if (!enlivened) return;
       ensureObjMeta(enlivened);
+      setObjectLocked(enlivened, !!objectJson.wb_locked);
+      enforceNoMirrorObject(enlivened);
       const existing = findObjectById(objectJson.obj_id);
       if (existing) {
         fabricCanvas.remove(existing);
@@ -803,6 +1016,7 @@
         isRemoteApplying = false;
       }
       syncRoundedImages();
+      syncLockStates();
       syncObjectInteractivity();
       restoreSelectionByIds(selectedIds);
       updateStylePanelVisibility();
@@ -1157,6 +1371,7 @@
 
   function onMouseDown(opt) {
     const evt = opt.e;
+    const target = opt && opt.target;
     const panByModifier = evt.button === 1 || (evt.button === 0 && (evt.ctrlKey || evt.metaKey));
     const panByTool = currentTool === "hand" && evt.button === 0;
 
@@ -1170,6 +1385,14 @@
     }
 
     if (!canEdit) return;
+
+    if (currentTool === "select" && target && isObjectLocked(target) && isLockEligibleObject(target)) {
+      focusedLockedObject = target;
+      updateLockButtonsState();
+      return;
+    }
+
+    focusedLockedObject = null;
 
     if (currentTool === "pencil" || currentTool === "shape" || currentTool === "text" || currentTool === "eraser") {
       hidePanels();
@@ -1192,6 +1415,9 @@
         fontSize: Number(textSizeEl ? textSizeEl.value : 24),
         fontFamily: "Montserrat, sans-serif",
         fontWeight: "500",
+        lockScalingFlip: true,
+        flipX: false,
+        flipY: false,
       });
       ensureObjMeta(text);
       fabricCanvas.add(text);
@@ -1227,11 +1453,14 @@
       const dy = evt.clientY - panLast.y;
       v[4] += dx;
       v[5] += dy;
+      const active = fabricCanvas.getActiveObject();
+      if (active && typeof active.setCoords === "function") active.setCoords();
       panLast = { x: evt.clientX, y: evt.clientY };
       fabricCanvas.requestRenderAll();
       renderRemoteCursors();
       drawMiniMap();
       updateGridPosition();
+      updateLockButtonsState();
     }
 
     if (erasing && currentTool === "eraser") {
@@ -1290,10 +1519,13 @@
       const v = fabricCanvas.viewportTransform;
       v[4] -= evt.deltaX;
       v[5] -= evt.deltaY;
+      const active = fabricCanvas.getActiveObject();
+      if (active && typeof active.setCoords === "function") active.setCoords();
       fabricCanvas.requestRenderAll();
       renderRemoteCursors();
       drawMiniMap();
       updateGridPosition();
+      updateLockButtonsState();
     }
     opt.e.preventDefault();
     opt.e.stopPropagation();
@@ -1327,13 +1559,25 @@
 
   fabricCanvas.on("object:added", (e) => {
     if (isRemoteApplying) return;
-    if (e.target) ensureObjMeta(e.target);
+    if (e.target) {
+      ensureObjMeta(e.target);
+      enforceNoMirrorInTarget(e.target);
+    }
     drawMiniMap();
+  });
+
+  fabricCanvas.on("object:scaling", (e) => {
+    const target = e && e.target;
+    if (!target) return;
+    if (enforceNoMirrorInTarget(target)) {
+      fabricCanvas.requestRenderAll();
+    }
   });
 
   fabricCanvas.on("object:modified", (e) => {
     const target = e && e.target;
     if (target) {
+      enforceNoMirrorInTarget(target);
       const applyOne = (obj) => {
         if (obj && obj.type === "image") applyImageCornerRadius(obj, getObjectCornerRadius(obj));
       };
@@ -1360,20 +1604,27 @@
   });
 
   fabricCanvas.on("selection:created", () => {
+    focusedLockedObject = null;
     applySelectionStyles();
     updateStylePanelVisibility();
+    updateLockButtonsState();
     updateRotateButtonState();
+    requestAnimationFrame(updateLockButtonsState);
   });
 
   fabricCanvas.on("selection:updated", () => {
+    focusedLockedObject = null;
     applySelectionStyles();
     updateStylePanelVisibility();
+    updateLockButtonsState();
     updateRotateButtonState();
+    requestAnimationFrame(updateLockButtonsState);
   });
 
   fabricCanvas.on("selection:cleared", () => {
     if (stylePanel) stylePanel.classList.remove("active");
     updateUndoRedoDockVisibility();
+    updateLockButtonsState();
     updateRotateButtonState();
   });
 
@@ -1435,6 +1686,7 @@
     if (!canEdit) return;
     hiddenImageInput.click();
   });
+  if (selectionLockBtn) selectionLockBtn.addEventListener("click", toggleSelectionLock);
 
   hiddenImageInput.addEventListener("change", () => {
     const file = hiddenImageInput.files && hiddenImageInput.files[0];
@@ -1596,6 +1848,7 @@
   window.addEventListener("resize", () => {
     resizeCanvas(false);
     hidePanels();
+    updateLockButtonsState();
   });
 
   document.addEventListener("click", (e) => {
@@ -1638,6 +1891,8 @@
     const v = fabricCanvas.viewportTransform;
     v[4] += center.x - pinchCenter.x;
     v[5] += center.y - pinchCenter.y;
+    const active = fabricCanvas.getActiveObject();
+    if (active && typeof active.setCoords === "function") active.setCoords();
     fabricCanvas.requestRenderAll();
 
     pinchDist = dist;
@@ -1645,10 +1900,15 @@
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
+    updateLockButtonsState();
   }, { passive: false });
 
   boardWrap.addEventListener("touchend", (e) => {
     if (e.touches.length < 2) pinchMode = false;
+  });
+
+  fabricCanvas.on("after:render", () => {
+    updateLockButtonsState();
   });
 
   socket.on("connect", () => {
@@ -1657,6 +1917,7 @@
 
   socket.on("disconnect", () => {
     // reconnection managed by socket.io
+    for (const clientId of remoteCursors.keys()) removeRemoteCursor(clientId);
   });
 
   socket.on("init", (msg) => {

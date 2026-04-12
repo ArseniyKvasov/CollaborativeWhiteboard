@@ -97,6 +97,7 @@
   let pinchMode = false;
   let pinchDist = 0;
   let pinchCenter = null;
+  let suppressTouchInputUntil = 0;
 
   let skipNextTextCreate = false;
   let focusedLockedObject = null;
@@ -484,6 +485,53 @@
 
     syncObjectInteractivity();
     updateBrush();
+  }
+
+  function suppressTouchInput(ms = 180) {
+    suppressTouchInputUntil = Date.now() + ms;
+  }
+
+  function isTouchInputSuppressed(evt) {
+    const touchCount = evt && evt.touches ? evt.touches.length : 0;
+    return pinchMode || touchCount > 1 || Date.now() < suppressTouchInputUntil;
+  }
+
+  function cancelTransientCanvasActions() {
+    panMode = false;
+    erasing = false;
+    if (drawingShape) {
+      fabricCanvas.remove(drawingShape);
+      drawingShape = null;
+      drawingStart = null;
+    }
+    fabricCanvas.discardActiveObject();
+    fabricCanvas.requestRenderAll();
+    drawMiniMap();
+    updateLockButtonsState();
+  }
+
+  function startPinch(touches) {
+    if (!touches || touches.length < 2) return;
+    pinchMode = true;
+    suppressTouchInput();
+    cancelTransientCanvasActions();
+
+    const [t1, t2] = touches;
+    pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    pinchCenter = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+
+    // В pinch-режиме полностью отключаем интерактив Fabric, чтобы не рисовать/не выделять случайно.
+    fabricCanvas.isDrawingMode = false;
+    fabricCanvas.selection = false;
+    fabricCanvas.skipTargetFind = true;
+  }
+
+  function stopPinch() {
+    if (!pinchMode) return;
+    pinchMode = false;
+    pinchCenter = null;
+    suppressTouchInput();
+    setTool(currentTool);
   }
 
   function setShapeType(shape) {
@@ -1654,6 +1702,11 @@
 
   function onMouseDown(opt) {
     const evt = opt.e;
+    if (isTouchInputSuppressed(evt)) {
+      if (typeof evt.preventDefault === "function") evt.preventDefault();
+      if (typeof evt.stopPropagation === "function") evt.stopPropagation();
+      return;
+    }
     const target = opt && opt.target;
     const panByModifier = evt.button === 1 || (evt.button === 0 && (evt.ctrlKey || evt.metaKey));
     const panByTool = currentTool === "hand" && evt.button === 0;
@@ -1727,6 +1780,10 @@
 
   function onMouseMove(opt) {
     const evt = opt.e;
+    if (isTouchInputSuppressed(evt)) {
+      if (typeof evt.preventDefault === "function") evt.preventDefault();
+      return;
+    }
     const world = worldFromScreen(evt.offsetX, evt.offsetY);
 
     if (panMode) {
@@ -1767,6 +1824,7 @@
   }
 
   function onMouseUp() {
+    if (pinchMode || Date.now() < suppressTouchInputUntil) return;
     if (panMode) {
       panMode = false;
       setTool(currentTool);
@@ -1826,6 +1884,10 @@
   });
 
   fabricCanvas.on("path:created", (e) => {
+    if (Date.now() < suppressTouchInputUntil) {
+      if (e.path) fabricCanvas.remove(e.path);
+      return;
+    }
     if (e.path) {
       ensureObjMeta(e.path);
       e.path.set({
@@ -2188,11 +2250,9 @@
   });
 
   boardWrap.addEventListener("touchstart", (e) => {
-    if (e.touches.length === 2) {
-      pinchMode = true;
-      const [t1, t2] = e.touches;
-      pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-      pinchCenter = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+    if (e.touches.length >= 2) {
+      e.preventDefault();
+      startPinch(e.touches);
     }
   }, { passive: false });
 
@@ -2223,7 +2283,14 @@
   }, { passive: false });
 
   boardWrap.addEventListener("touchend", (e) => {
-    if (e.touches.length < 2) pinchMode = false;
+    if (pinchMode && e.touches.length < 2) {
+      e.preventDefault();
+      stopPinch();
+    }
+  }, { passive: false });
+
+  boardWrap.addEventListener("touchcancel", () => {
+    stopPinch();
   });
 
   fabricCanvas.on("after:render", () => {

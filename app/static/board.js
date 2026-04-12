@@ -105,6 +105,8 @@
 
   let lastCursorSentAt = 0;
   const remoteCursors = new Map();
+  const supportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
+  const activeTouchPointers = new Map();
 
   let miniState = {
     minX: 0,
@@ -537,8 +539,8 @@
     updateLockButtonsState();
   }
 
-  function startPinch(touches) {
-    if (!touches || touches.length < 2) return;
+  function startPinchWithPoints(p1, p2) {
+    if (!p1 || !p2) return;
     pinchMode = true;
     suppressTouchInput(320);
     suppressPathCreated(1800);
@@ -554,14 +556,19 @@
 
     cancelTransientCanvasActions();
 
-    const [t1, t2] = touches;
-    pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-    pinchCenter = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+    pinchDist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    pinchCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
 
     // В pinch-режиме полностью отключаем интерактив Fabric, чтобы не рисовать/не выделять случайно.
     fabricCanvas.isDrawingMode = false;
     fabricCanvas.selection = false;
     fabricCanvas.skipTargetFind = true;
+  }
+
+  function startPinch(touches) {
+    if (!touches || touches.length < 2) return;
+    const [t1, t2] = touches;
+    startPinchWithPoints({ x: t1.clientX, y: t1.clientY }, { x: t2.clientX, y: t2.clientY });
   }
 
   function stopPinch() {
@@ -571,6 +578,30 @@
     suppressTouchInput(320);
     suppressPathCreated(700);
     setTool(currentTool);
+  }
+
+  function updatePinchWithPoints(p1, p2) {
+    if (!pinchMode || !p1 || !p2 || !pinchCenter) return;
+    const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const center = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+    const factor = dist / Math.max(1, pinchDist);
+    const rect = boardWrap.getBoundingClientRect();
+    zoomByFactor(factor, center.x - rect.left, center.y - rect.top);
+
+    const v = fabricCanvas.viewportTransform;
+    v[4] += center.x - pinchCenter.x;
+    v[5] += center.y - pinchCenter.y;
+    const active = fabricCanvas.getActiveObject();
+    if (active && typeof active.setCoords === "function") active.setCoords();
+    fabricCanvas.requestRenderAll();
+
+    pinchDist = dist;
+    pinchCenter = center;
+    renderRemoteCursors();
+    drawMiniMap();
+    updateGridPosition();
+    updateLockButtonsState();
   }
 
   function setShapeType(shape) {
@@ -2291,6 +2322,7 @@
   });
 
   boardWrap.addEventListener("touchstart", (e) => {
+    if (supportsPointerEvents) return;
     if (e.touches.length >= 2) {
       e.preventDefault();
       if (typeof e.stopPropagation === "function") e.stopPropagation();
@@ -2299,33 +2331,19 @@
   }, { passive: false, capture: true });
 
   boardWrap.addEventListener("touchmove", (e) => {
+    if (supportsPointerEvents) return;
     if (!pinchMode || e.touches.length < 2) return;
     e.preventDefault();
     if (typeof e.stopPropagation === "function") e.stopPropagation();
     const [t1, t2] = e.touches;
-    const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-    const center = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
-
-    const factor = dist / Math.max(1, pinchDist);
-    const rect = boardWrap.getBoundingClientRect();
-    zoomByFactor(factor, center.x - rect.left, center.y - rect.top);
-
-    const v = fabricCanvas.viewportTransform;
-    v[4] += center.x - pinchCenter.x;
-    v[5] += center.y - pinchCenter.y;
-    const active = fabricCanvas.getActiveObject();
-    if (active && typeof active.setCoords === "function") active.setCoords();
-    fabricCanvas.requestRenderAll();
-
-    pinchDist = dist;
-    pinchCenter = center;
-    renderRemoteCursors();
-    drawMiniMap();
-    updateGridPosition();
-    updateLockButtonsState();
+    updatePinchWithPoints(
+      { x: t1.clientX, y: t1.clientY },
+      { x: t2.clientX, y: t2.clientY },
+    );
   }, { passive: false, capture: true });
 
   boardWrap.addEventListener("touchend", (e) => {
+    if (supportsPointerEvents) return;
     if (pinchMode && e.touches.length < 2) {
       e.preventDefault();
       if (typeof e.stopPropagation === "function") e.stopPropagation();
@@ -2334,9 +2352,53 @@
   }, { passive: false, capture: true });
 
   boardWrap.addEventListener("touchcancel", (e) => {
+    if (supportsPointerEvents) return;
     if (typeof e.preventDefault === "function") e.preventDefault();
     if (typeof e.stopPropagation === "function") e.stopPropagation();
     stopPinch();
+  }, { passive: false, capture: true });
+
+  boardWrap.addEventListener("pointerdown", (e) => {
+    if (!supportsPointerEvents || e.pointerType !== "touch") return;
+    activeTouchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activeTouchPointers.size < 2) return;
+    e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
+    const points = [...activeTouchPointers.values()];
+    if (!pinchMode) startPinchWithPoints(points[0], points[1]);
+  }, { passive: false, capture: true });
+
+  boardWrap.addEventListener("pointermove", (e) => {
+    if (!supportsPointerEvents || e.pointerType !== "touch") return;
+    if (!activeTouchPointers.has(e.pointerId)) return;
+    activeTouchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activeTouchPointers.size < 2) return;
+    e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
+    const points = [...activeTouchPointers.values()];
+    if (!pinchMode) {
+      startPinchWithPoints(points[0], points[1]);
+      return;
+    }
+    updatePinchWithPoints(points[0], points[1]);
+  }, { passive: false, capture: true });
+
+  boardWrap.addEventListener("pointerup", (e) => {
+    if (!supportsPointerEvents || e.pointerType !== "touch") return;
+    activeTouchPointers.delete(e.pointerId);
+    if (pinchMode && activeTouchPointers.size < 2) {
+      e.preventDefault();
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
+      stopPinch();
+    }
+  }, { passive: false, capture: true });
+
+  boardWrap.addEventListener("pointercancel", (e) => {
+    if (!supportsPointerEvents || e.pointerType !== "touch") return;
+    activeTouchPointers.delete(e.pointerId);
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
+    if (pinchMode && activeTouchPointers.size < 2) stopPinch();
   }, { passive: false, capture: true });
 
   fabricCanvas.on("after:render", () => {

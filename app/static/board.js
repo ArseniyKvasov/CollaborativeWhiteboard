@@ -2293,13 +2293,15 @@
   boardWrap.addEventListener("touchstart", (e) => {
     if (e.touches.length >= 2) {
       e.preventDefault();
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
       startPinch(e.touches);
     }
-  }, { passive: false });
+  }, { passive: false, capture: true });
 
   boardWrap.addEventListener("touchmove", (e) => {
-    if (!pinchMode || e.touches.length !== 2) return;
+    if (!pinchMode || e.touches.length < 2) return;
     e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
     const [t1, t2] = e.touches;
     const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
     const center = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
@@ -2321,18 +2323,21 @@
     drawMiniMap();
     updateGridPosition();
     updateLockButtonsState();
-  }, { passive: false });
+  }, { passive: false, capture: true });
 
   boardWrap.addEventListener("touchend", (e) => {
     if (pinchMode && e.touches.length < 2) {
       e.preventDefault();
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
       stopPinch();
     }
-  }, { passive: false });
+  }, { passive: false, capture: true });
 
-  boardWrap.addEventListener("touchcancel", () => {
+  boardWrap.addEventListener("touchcancel", (e) => {
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
     stopPinch();
-  });
+  }, { passive: false, capture: true });
 
   fabricCanvas.on("after:render", () => {
     updateLockButtonsState();

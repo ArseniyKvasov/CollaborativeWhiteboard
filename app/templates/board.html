@@ -63,6 +63,35 @@
       box-shadow: 0 10px 24px rgba(17, 24, 39, 0.18);
     }
 
+    #boardNotice {
+      position: fixed;
+      left: 50%;
+      top: max(calc(var(--toolbar-top) + 56px), var(--safe-top));
+      transform: translate(-50%, -10px);
+      z-index: 38;
+      min-width: 220px;
+      max-width: min(86vw, 560px);
+      padding: 10px 14px;
+      border-radius: 11px;
+      border: 1px solid #fecaca;
+      background: rgba(254, 242, 242, 0.96);
+      color: #b91c1c;
+      box-shadow: 0 10px 22px rgba(17, 24, 39, 0.16);
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 130ms ease, transform 130ms ease, visibility 130ms ease;
+    }
+
+    #boardNotice.is-visible {
+      opacity: 1;
+      visibility: visible;
+      transform: translate(-50%, 0);
+    }
+
     .remote-cursor {
       position: absolute;
       transform: translate(-2px, -2px);
@@ -406,6 +435,7 @@
     <canvas id="canvas"></canvas>
     <div id="cursorLayer"></div>
   </div>
+  <div id="boardNotice" aria-live="polite"></div>
   <button class="tool-btn selection-lock-btn" id="selectionLockBtn" title="Блокировать выделение" type="button"><span class="bi-local" style="--icon:url('/static/icons/lock.svg')"></span></button>
 
   <div class="floating-toolbar" id="toolbar">
@@ -478,6 +508,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260412-01"></script>
+  <script src="/static/board.js?v=20260412-02"></script>
 </body>
 </html>

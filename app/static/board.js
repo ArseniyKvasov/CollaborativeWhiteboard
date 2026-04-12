@@ -26,6 +26,7 @@
   const mobileBgBtn = document.getElementById("mobileBgBtn");
   const mobileMoreBtn = document.getElementById("mobileMoreBtn");
   const hiddenImageInput = document.getElementById("hiddenImageInput");
+  const boardNoticeEl = document.getElementById("boardNotice");
 
   const pencilPanel = document.getElementById("pencilPanel");
   const textPanel = document.getElementById("textPanel");
@@ -57,7 +58,9 @@
   const LOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/lock-outline.svg\')"></span>';
   const UNLOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/unlock-outline.svg\')"></span>';
   const MAX_IMAGE_IMPORT_SIDE = 2400;
-  const TARGET_IMAGE_BYTES = 3 * 1024 * 1024;
+  const TARGET_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_BOARD_BYTES = 15 * 1024 * 1024;
+  const BOARD_SOFT_LIMIT_BYTES = MAX_BOARD_BYTES - 220 * 1024;
 
   let currentTool = "select";
   let currentShapeType = "rect";
@@ -78,10 +81,12 @@
   let cursorAnimFrame = 0;
   let pendingTextSyncTimer = null;
   let localOpSeq = 0;
+  let boardNoticeTimer = null;
   let copiedSelectionPayload = [];
   const ACTIVE_SURFACE_ID = "main";
   const PASTE_SHIFT_STEP = 24;
   let pasteShiftCount = 0;
+  const jsonEncoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
 
   let panMode = false;
   let panLast = { x: 0, y: 0 };
@@ -979,6 +984,42 @@
     return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
   }
 
+  function estimateJsonBytes(payload) {
+    try {
+      const json = JSON.stringify(payload);
+      if (typeof json !== "string") return 0;
+      if (jsonEncoder) return jsonEncoder.encode(json).length;
+      return unescape(encodeURIComponent(json)).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function isImageFile(file) {
+    return !!(file && typeof file.type === "string" && file.type.toLowerCase().startsWith("image/"));
+  }
+
+  function hasDraggedFiles(dataTransfer) {
+    if (!dataTransfer) return false;
+    if (dataTransfer.files && dataTransfer.files.length > 0) return true;
+    const types = dataTransfer.types;
+    if (!types) return false;
+    if (typeof types.includes === "function") return types.includes("Files");
+    return Array.from(types).includes("Files");
+  }
+
+  function showBoardNotice(message) {
+    const text = String(message || "").trim();
+    if (!text) return;
+    if (!boardNoticeEl) return;
+    boardNoticeEl.textContent = text;
+    boardNoticeEl.classList.add("is-visible");
+    if (boardNoticeTimer) clearTimeout(boardNoticeTimer);
+    boardNoticeTimer = setTimeout(() => {
+      boardNoticeEl.classList.remove("is-visible");
+    }, 2400);
+  }
+
   function readFileAsDataUrl(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1010,44 +1051,87 @@
     const img = await loadImageElement(original);
     const srcW = Math.max(1, Number(img.naturalWidth || img.width || 1));
     const srcH = Math.max(1, Number(img.naturalHeight || img.height || 1));
+    const sourceType = String(file?.type || "").toLowerCase();
+    const sourceNeedsReencode = /image\/(png|bmp|tiff|gif|heic|heif)/i.test(sourceType);
     const scale = Math.min(1, MAX_IMAGE_IMPORT_SIDE / Math.max(srcW, srcH));
-    const dstW = Math.max(1, Math.round(srcW * scale));
-    const dstH = Math.max(1, Math.round(srcH * scale));
+    let dstW = Math.max(1, Math.round(srcW * scale));
+    let dstH = Math.max(1, Math.round(srcH * scale));
 
     const needResize = dstW !== srcW || dstH !== srcH;
     const originalBytes = estimateDataUrlBytes(original);
-    if (!needResize && originalBytes <= TARGET_IMAGE_BYTES) return original;
+    if (!needResize && !sourceNeedsReencode && originalBytes <= TARGET_IMAGE_BYTES) return original;
 
-    const canvas = document.createElement("canvas");
-    canvas.width = dstW;
-    canvas.height = dstH;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return original;
-    ctx.drawImage(img, 0, 0, dstW, dstH);
+    let best = original;
+    let bestBytes = originalBytes || Number.MAX_SAFE_INTEGER;
 
-    const candidates = [
-      canvasToDataUrl(canvas, "image/webp", 0.86),
-      canvasToDataUrl(canvas, "image/jpeg", 0.86),
-      canvasToDataUrl(canvas, "image/webp", 0.74),
-      canvasToDataUrl(canvas, "image/jpeg", 0.74),
-      canvasToDataUrl(canvas, "image/png"),
-    ].filter(Boolean);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = dstW;
+      canvas.height = dstH;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) break;
+      ctx.drawImage(img, 0, 0, dstW, dstH);
 
-    if (!candidates.length) return original;
-    let best = candidates[0];
-    for (const c of candidates) {
-      if (estimateDataUrlBytes(c) < estimateDataUrlBytes(best)) best = c;
-      if (estimateDataUrlBytes(c) <= TARGET_IMAGE_BYTES) return c;
+      const candidates = [
+        canvasToDataUrl(canvas, "image/webp", 0.86),
+        canvasToDataUrl(canvas, "image/jpeg", 0.86),
+        canvasToDataUrl(canvas, "image/webp", 0.78),
+        canvasToDataUrl(canvas, "image/jpeg", 0.78),
+        canvasToDataUrl(canvas, "image/webp", 0.68),
+        canvasToDataUrl(canvas, "image/jpeg", 0.68),
+        canvasToDataUrl(canvas, "image/png"),
+      ].filter(Boolean);
+
+      for (const candidate of candidates) {
+        const bytes = estimateDataUrlBytes(candidate);
+        if (bytes > 0 && bytes < bestBytes) {
+          best = candidate;
+          bestBytes = bytes;
+        }
+        if (bytes > 0 && bytes <= TARGET_IMAGE_BYTES) return candidate;
+      }
+
+      if (dstW <= 680 && dstH <= 680) break;
+      dstW = Math.max(1, Math.round(dstW * 0.82));
+      dstH = Math.max(1, Math.round(dstH * 0.82));
     }
     return best;
   }
 
-  function showBoardError(message) {
-    const text = String(message || "Ошибка синхронизации доски");
-    console.error(text);
-    if (/15\s*MB|size exceeds|payload|too large/i.test(text)) {
-      alert("Изображение слишком большое для синхронизации. Уменьшите размер/качество и попробуйте снова.");
+  function willExceedBoardLimitWithObject(objectJson) {
+    if (!objectJson || typeof objectJson !== "object") return false;
+    const objects = fabricCanvas.getObjects()
+      .filter((obj) => isSyncableObject(obj) && !obj._isDraft)
+      .map((obj) => serializeObject(obj));
+    objects.push(objectJson);
+    const projectedCanvas = {
+      version: "6.0.0",
+      background: "#ffffff",
+      objects,
+    };
+    const projectedSize = estimateJsonBytes(projectedCanvas);
+    return projectedSize > 0 && projectedSize > BOARD_SOFT_LIMIT_BYTES;
+  }
+
+  function normalizeBoardErrorMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) return "Ошибка синхронизации доски";
+    if (/unsupported_file_type|unsupported format/i.test(text)) {
+      return "Неподдерживаемый формат файла";
     }
+    if (/image_read_failed|image_decode_failed/i.test(text)) {
+      return "Не удалось прочитать изображение";
+    }
+    if (/15\s*MB|size exceeds|payload|too large/i.test(text)) {
+      return "Изображение слишком большое для синхронизации. Уменьшите размер и попробуйте снова.";
+    }
+    return text;
+  }
+
+  function showBoardError(message) {
+    const text = normalizeBoardErrorMessage(message);
+    console.error(String(message || text));
+    showBoardNotice(text);
   }
 
   function cloneForPaste(jsonObject) {
@@ -1371,8 +1455,13 @@
         top: worldY - img.getScaledHeight() / 2,
       });
       ensureObjMeta(img);
+      const serialized = serializeObject(img);
+      if (willExceedBoardLimitWithObject(serialized)) {
+        showBoardError("Изображение слишком большое для текущей доски");
+        return;
+      }
       fabricCanvas.add(img);
-      enqueueAddOp(img);
+      enqueueOps(buildAction("add", { object: serialized }));
       fabricCanvas.setActiveObject(img);
       updateStylePanelVisibility();
     }).catch((err) => {
@@ -1381,7 +1470,7 @@
   }
 
   async function addImageFileAtWorldPoint(file, worldX, worldY) {
-    if (!file || !file.type || !file.type.startsWith("image/")) return;
+    if (!isImageFile(file)) throw new Error("unsupported_file_type");
     let dataUrl = "";
     try {
       dataUrl = await optimizeImageFile(file);
@@ -1884,7 +1973,15 @@
 
   hiddenImageInput.addEventListener("change", () => {
     const file = hiddenImageInput.files && hiddenImageInput.files[0];
-    if (!file) return;
+    if (!file) {
+      hiddenImageInput.value = "";
+      return;
+    }
+    if (!isImageFile(file)) {
+      showBoardError("Неподдерживаемый формат файла");
+      hiddenImageInput.value = "";
+      return;
+    }
     const center = worldCenterOfViewport();
     addImageFileAtWorldPoint(file, center.x, center.y).catch((err) => {
       showBoardError(err?.message || "Не удалось загрузить изображение");
@@ -1892,12 +1989,29 @@
     hiddenImageInput.value = "";
   });
 
-  boardWrap.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("dragover", (e) => {
+    if (hasDraggedFiles(e.dataTransfer)) e.preventDefault();
+  });
+  window.addEventListener("drop", (e) => {
+    if (hasDraggedFiles(e.dataTransfer)) e.preventDefault();
+  });
+
+  boardWrap.addEventListener("dragover", (e) => {
+    if (!hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    if (e.dataTransfer && canEdit) e.dataTransfer.dropEffect = "copy";
+  });
   boardWrap.addEventListener("drop", (e) => {
     e.preventDefault();
+    e.stopPropagation();
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
     if (!canEdit) return;
-    const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith("image/"));
-    if (!file) return;
+    const file = files.find((f) => isImageFile(f));
+    if (!file) {
+      showBoardError("Неподдерживаемый формат файла");
+      return;
+    }
     const p = activeDropWorldPoint(e.clientX, e.clientY);
     addImageFileAtWorldPoint(file, p.x, p.y).catch((err) => {
       showBoardError(err?.message || "Не удалось загрузить изображение");

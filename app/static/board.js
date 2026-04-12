@@ -75,6 +75,11 @@
   let remoteOpsChain = Promise.resolve();
   let cursorAnimFrame = 0;
   let pendingTextSyncTimer = null;
+  let localOpSeq = 0;
+  let copiedSelectionPayload = [];
+  const ACTIVE_SURFACE_ID = "main";
+  const PASTE_SHIFT_STEP = 24;
+  let pasteShiftCount = 0;
 
   let panMode = false;
   let panLast = { x: 0, y: 0 };
@@ -803,6 +808,33 @@
     return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius", "shapeKind", "wb_locked"]);
   }
 
+  function cloneJson(value) {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function nextActionId() {
+    return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  }
+
+  function buildAction(op, payload = {}) {
+    localOpSeq += 1;
+    const clientId = myClientId || historyClientId || "client";
+    return {
+      v: 1,
+      op,
+      client_id: clientId,
+      seq: localOpSeq,
+      ts: Date.now(),
+      action_id: nextActionId(),
+      surface_id: ACTIVE_SURFACE_ID,
+      ...payload,
+    };
+  }
+
   function serializeAbsoluteObject(obj) {
     const json = serializeObject(obj);
     if (!obj || !fabric || !fabric.util || typeof obj.calcTransformMatrix !== "function") {
@@ -885,29 +917,31 @@
       if (!pendingOps.length) return;
       const batch = pendingOps;
       pendingOps = [];
-      socket.emit("ops", { ops: batch });
+      socket.emit("batch_update", { ops: batch });
     }, 35);
   }
 
   function enqueueAddOp(obj) {
     if (!isSyncableObject(obj) || obj._isDraft) return;
-    enqueueOps({ type: "add", object: serializeObject(obj) });
+    enqueueOps(buildAction("add", { object: serializeObject(obj) }));
   }
 
   function enqueueUpdateOp(obj) {
     if (!isSyncableObject(obj) || obj._isDraft) return;
-    enqueueOps({ type: "update", object: serializeObject(obj) });
+    enqueueOps(buildAction("update", { object: serializeObject(obj) }));
   }
 
   function emitUpdateOpImmediate(obj, absolute = false) {
     if (!canEdit || isRemoteApplying || suppressBroadcast) return;
     if (!isSyncableObject(obj) || obj._isDraft) return;
-    socket.emit("ops", { ops: [{ type: "update", object: absolute ? serializeAbsoluteObject(obj) : serializeObject(obj) }] });
+    socket.emit("batch_update", {
+      ops: [buildAction("update", { object: absolute ? serializeAbsoluteObject(obj) : serializeObject(obj) })],
+    });
   }
 
   function enqueueRemoveOp(obj) {
     if (!isSyncableObject(obj) || obj._isDraft || !obj.obj_id) return;
-    enqueueOps({ type: "remove", obj_id: obj.obj_id });
+    enqueueOps(buildAction("remove", { obj_id: obj.obj_id, object_id: obj.obj_id }));
   }
 
   function enqueueSelectionUpdates() {
@@ -916,8 +950,71 @@
     enqueueOps(
       objects
         .filter((obj) => isSyncableObject(obj))
-        .map((obj) => ({ type: "update", object: serializeObject(obj) })),
+        .map((obj) => buildAction("update", { object: serializeObject(obj) })),
     );
+  }
+
+  function isEditingTextNow() {
+    const active = fabricCanvas.getActiveObject();
+    return !!(active && active.type === "i-text" && active.isEditing);
+  }
+
+  function copyActiveSelection() {
+    const objects = getSelectionObjects().filter((obj) => isSyncableObject(obj) && !obj._isDraft);
+    if (!objects.length) return false;
+    copiedSelectionPayload = objects.map((obj) => serializeAbsoluteObject(obj));
+    pasteShiftCount = 0;
+    return true;
+  }
+
+  function cloneForPaste(jsonObject) {
+    return Promise.resolve(fabric.util.enlivenObjects([jsonObject]))
+      .then((list) => (Array.isArray(list) && list.length ? list[0] : null))
+      .catch(() => null);
+  }
+
+  async function pasteCopiedSelection() {
+    if (!canEdit || !copiedSelectionPayload.length) return;
+    const payload = cloneJson(copiedSelectionPayload) || [];
+    if (!payload.length) return;
+
+    pasteShiftCount += 1;
+    const dx = PASTE_SHIFT_STEP * pasteShiftCount;
+    const dy = PASTE_SHIFT_STEP * pasteShiftCount;
+
+    const inserted = [];
+    for (const item of payload) {
+      if (!item || typeof item !== "object") continue;
+      const cloned = await cloneForPaste(item);
+      if (!cloned) continue;
+      cloned.set({
+        left: Number(cloned.left || 0) + dx,
+        top: Number(cloned.top || 0) + dy,
+      });
+      cloned.obj_id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+      cloned.author_id = myUserId || cloned.author_id || "unknown";
+      cloned.author_name = localUsername || cloned.author_name || "user";
+      setObjectLocked(cloned, !!cloned.wb_locked);
+      enforceNoMirrorObject(cloned);
+      cloned.setCoords();
+      fabricCanvas.add(cloned);
+      inserted.push(cloned);
+    }
+
+    if (!inserted.length) return;
+
+    const ops = inserted.map((obj) => buildAction("add", { object: serializeObject(obj) }));
+    enqueueOps(ops);
+
+    if (inserted.length === 1) {
+      fabricCanvas.setActiveObject(inserted[0]);
+    } else {
+      const selection = new fabric.ActiveSelection(inserted, { canvas: fabricCanvas });
+      fabricCanvas.setActiveObject(selection);
+    }
+    applySelectionStyles();
+    updateStylePanelVisibility();
+    fabricCanvas.requestRenderAll();
   }
 
   function enqueueTextUpdateDebounced(obj) {
@@ -965,9 +1062,9 @@
 
   async function applyRemoteOp(op) {
     if (!op || typeof op !== "object") return;
-    const type = String(op.type || "").toLowerCase();
+    const type = String(op.type || op.op || "").toLowerCase();
     if (type === "remove") {
-      const target = findObjectById(op.obj_id);
+      const target = findObjectById(op.obj_id || op.object_id);
       if (target) fabricCanvas.remove(target);
       return;
     }
@@ -984,14 +1081,14 @@
       ensureObjMeta(enlivened);
       setObjectLocked(enlivened, !!objectJson.wb_locked);
       enforceNoMirrorObject(enlivened);
-      const existing = findObjectById(objectJson.obj_id);
+      const existing = findObjectById(objectJson.obj_id || objectJson.object_id);
       if (existing) {
         fabricCanvas.remove(existing);
       }
       fabricCanvas.add(enlivened);
       if (type === "update") {
         const activeIds = new Set(captureActiveSelectionIds());
-        if (activeIds.has(objectJson.obj_id)) {
+        if (activeIds.has(objectJson.obj_id || objectJson.object_id)) {
           restoreSelectionByIds([...activeIds]);
         }
       }
@@ -1836,6 +1933,21 @@
       return;
     }
 
+    if (!isInput && (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "c") {
+      if (currentTool === "select" && !isEditingTextNow()) {
+        if (copyActiveSelection()) e.preventDefault();
+      }
+      return;
+    }
+
+    if (!isInput && (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "v") {
+      if (currentTool === "select" && !isEditingTextNow()) {
+        e.preventDefault();
+        pasteCopiedSelection();
+      }
+      return;
+    }
+
     if (!isInput && (e.key === "Delete" || e.key === "Backspace")) {
       const active = fabricCanvas.getActiveObject();
       if (active) {
@@ -1944,6 +2056,9 @@
   });
 
   socket.on("ops", (msg) => {
+    if (msg && Array.isArray(msg.ops)) applyRemoteOps(msg.ops);
+  });
+  socket.on("batch_update", (msg) => {
     if (msg && Array.isArray(msg.ops)) applyRemoteOps(msg.ops);
   });
 

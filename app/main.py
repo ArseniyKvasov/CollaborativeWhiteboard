@@ -45,6 +45,8 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
 PENDING_OWNER_ID = "__pending_moderator__"
+MAX_BOARD_BYTES = 15 * 1024 * 1024
+DEFAULT_SURFACE_ID = "main"
 
 
 @dataclass
@@ -230,6 +232,181 @@ def default_canvas_state() -> dict[str, Any]:
     return {"version": "6.0.0", "objects": [], "background": "#ffffff"}
 
 
+def _new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _json_size_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _ensure_board_size_limit(value: Any) -> None:
+    size = _json_size_bytes(value)
+    if size > MAX_BOARD_BYTES:
+        raise ValueError(f"Board size exceeds 15 MB ({size} bytes)")
+
+
+def _normalize_runtime_canvas(canvas_json: Any, user: Optional[UserContext] = None) -> dict[str, Any]:
+    if not isinstance(canvas_json, dict):
+        return default_canvas_state()
+    normalized = dict(canvas_json)
+    objects = normalized.get("objects")
+    if not isinstance(objects, list):
+        objects = []
+    out_objects: list[dict[str, Any]] = []
+    for raw in objects:
+        if not isinstance(raw, dict):
+            continue
+        obj = dict(raw)
+        if not obj.get("obj_id"):
+            obj["obj_id"] = _new_id()
+        if not obj.get("author_id"):
+            obj["author_id"] = user.user_id if user else "unknown"
+        if not obj.get("author_name"):
+            obj["author_name"] = user.username if user else "user"
+        out_objects.append(obj)
+    normalized["objects"] = out_objects
+    if "version" not in normalized:
+        normalized["version"] = "6.0.0"
+    if "background" not in normalized:
+        normalized["background"] = "#ffffff"
+    return normalized
+
+
+def _normalize_lite_canvas_state(state: Any) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {"v": 2, "type": "lite_canvas_relative", "objects": []}
+    objects = state.get("objects")
+    if not isinstance(objects, list):
+        objects = []
+    normalized_objects: list[dict[str, Any]] = []
+    for item in objects:
+        if not isinstance(item, dict):
+            continue
+        rel_raw = item.get("rel")
+        if not isinstance(rel_raw, dict):
+            rel_raw = item.get("object") if isinstance(item.get("object"), dict) else None
+        if not isinstance(rel_raw, dict):
+            rel_raw = dict(item)
+            for k in ("annotationId", "obj_id", "author_id", "author_name", "rel", "object"):
+                rel_raw.pop(k, None)
+        rel = dict(rel_raw)
+
+        obj_id = str(item.get("obj_id") or rel.get("obj_id") or item.get("annotationId") or _new_id())
+        author_id = str(item.get("author_id") or rel.get("author_id") or "unknown")
+        author_name = str(item.get("author_name") or rel.get("author_name") or "user")
+        annotation_id = str(item.get("annotationId") or obj_id)
+
+        rel["obj_id"] = obj_id
+        rel["author_id"] = author_id
+        rel["author_name"] = author_name
+        normalized_objects.append(
+            {
+                "annotationId": annotation_id,
+                "obj_id": obj_id,
+                "author_id": author_id,
+                "author_name": author_name,
+                "rel": rel,
+            }
+        )
+    normalized = {"v": 2, "type": "lite_canvas_relative", "objects": normalized_objects}
+    if "background" in state:
+        normalized["background"] = state["background"]
+    return normalized
+
+
+def _runtime_to_lite_canvas_state(canvas_json: dict[str, Any], user: Optional[UserContext] = None) -> dict[str, Any]:
+    runtime = _normalize_runtime_canvas(canvas_json, user)
+    objects = runtime.get("objects", [])
+    lite_objects = []
+    for raw in objects:
+        if not isinstance(raw, dict):
+            continue
+        obj = dict(raw)
+        obj_id = str(obj.get("obj_id") or _new_id())
+        author_id = str(obj.get("author_id") or (user.user_id if user else "unknown"))
+        author_name = str(obj.get("author_name") or (user.username if user else "user"))
+        obj["obj_id"] = obj_id
+        obj["author_id"] = author_id
+        obj["author_name"] = author_name
+        lite_objects.append(
+            {
+                "annotationId": obj_id,
+                "obj_id": obj_id,
+                "author_id": author_id,
+                "author_name": author_name,
+                "rel": obj,
+            }
+        )
+    out = {"v": 2, "type": "lite_canvas_relative", "objects": lite_objects}
+    if "background" in runtime:
+        out["background"] = runtime["background"]
+    return out
+
+
+def _lite_canvas_state_to_runtime(state: Any) -> dict[str, Any]:
+    lite = _normalize_lite_canvas_state(state)
+    runtime_objects: list[dict[str, Any]] = []
+    for item in lite.get("objects", []):
+        if not isinstance(item, dict):
+            continue
+        rel = item.get("rel")
+        if not isinstance(rel, dict):
+            continue
+        obj = dict(rel)
+        obj_id = str(item.get("obj_id") or item.get("annotationId") or obj.get("obj_id") or _new_id())
+        obj["obj_id"] = obj_id
+        if not obj.get("author_id"):
+            obj["author_id"] = item.get("author_id") or "unknown"
+        if not obj.get("author_name"):
+            obj["author_name"] = item.get("author_name") or "user"
+        runtime_objects.append(obj)
+    runtime = {"version": "6.0.0", "objects": runtime_objects}
+    runtime["background"] = lite.get("background", "#ffffff")
+    return runtime
+
+
+def _normalize_storage_state(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("type") == "multi_surface" and isinstance(value.get("surfaces"), dict):
+        surfaces: dict[str, dict[str, Any]] = {}
+        for surface_id, surface_state in value["surfaces"].items():
+            if not isinstance(surface_id, str) or not surface_id:
+                continue
+            surfaces[surface_id] = _normalize_lite_canvas_state(surface_state)
+        if not surfaces:
+            surfaces[DEFAULT_SURFACE_ID] = _normalize_lite_canvas_state({})
+        return {"v": 1, "type": "multi_surface", "surfaces": surfaces}
+
+    if isinstance(value, dict) and value.get("type") == "lite_canvas_relative":
+        return {
+            "v": 1,
+            "type": "multi_surface",
+            "surfaces": {DEFAULT_SURFACE_ID: _normalize_lite_canvas_state(value)},
+        }
+
+    if isinstance(value, dict) and isinstance(value.get("objects"), list):
+        return {
+            "v": 1,
+            "type": "multi_surface",
+            "surfaces": {DEFAULT_SURFACE_ID: _runtime_to_lite_canvas_state(value)},
+        }
+
+    return {
+        "v": 1,
+        "type": "multi_surface",
+        "surfaces": {DEFAULT_SURFACE_ID: _runtime_to_lite_canvas_state(default_canvas_state())},
+    }
+
+
+def _storage_to_runtime_canvas(storage: Any, surface_id: str = DEFAULT_SURFACE_ID) -> dict[str, Any]:
+    normalized = _normalize_storage_state(storage)
+    surfaces = normalized.get("surfaces", {})
+    surface = surfaces.get(surface_id)
+    if not isinstance(surface, dict):
+        surface = next((v for v in surfaces.values() if isinstance(v, dict)), {"v": 2, "type": "lite_canvas_relative", "objects": []})
+    return _lite_canvas_state_to_runtime(surface)
+
+
 def create_board_if_missing(conn: sqlite3.Connection, board_id: str, owner_id: str) -> sqlite3.Row:
     row = board_row(conn, board_id)
     if row:
@@ -357,7 +534,7 @@ def get_board_state(board_id: str, user: UserContext = Depends(authenticate_requ
         role = require_role(conn, board_id, user.user_id, "viewer")
         return {
             "board_id": row["board_id"],
-            "canvas_json": json.loads(row["canvas_json"]),
+            "canvas_json": _read_board_canvas(conn, board_id),
             "owner_id": row["owner_id"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -375,10 +552,15 @@ def save_board_state(board_id: str, body: SaveBoardRequest, user: UserContext = 
         ensure_user_board_access(conn, board_id, user)
         ensure_board_exists(conn, board_id)
         require_role(conn, board_id, user.user_id, "editor")
+        next_canvas = _normalize_canvas(body.canvas_json, user)
+        try:
+            _ensure_board_size_limit(next_canvas)
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         updated_at = now_iso()
         conn.execute(
             "UPDATE boards SET canvas_json = ?, updated_at = ? WHERE board_id = ?",
-            (json.dumps(body.canvas_json, ensure_ascii=False), updated_at, board_id),
+            (json.dumps(next_canvas, ensure_ascii=False), updated_at, board_id),
         )
         conn.commit()
         return {"ok": True, "board_id": board_id, "updated_at": updated_at}
@@ -559,22 +741,7 @@ def _objects_map(canvas_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _normalize_canvas(canvas_json: dict[str, Any], user: UserContext) -> dict[str, Any]:
-    objects = canvas_json.get("objects")
-    if not isinstance(objects, list):
-        canvas_json["objects"] = []
-        objects = canvas_json["objects"]
-
-    for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-        if not obj.get("obj_id"):
-            obj["obj_id"] = uuid.uuid4().hex
-        if not obj.get("author_id"):
-            obj["author_id"] = user.user_id
-        if not obj.get("author_name"):
-            obj["author_name"] = user.username
-
-    return canvas_json
+    return _normalize_runtime_canvas(canvas_json, user)
 
 
 def _build_action(old_canvas: dict[str, Any], new_canvas: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -672,7 +839,7 @@ def _apply_prepared_ops(canvas_json: dict[str, Any], ops: list[dict[str, Any]], 
     for op in ops:
         if not isinstance(op, dict):
             continue
-        op_type = str(op.get("type") or "").lower()
+        op_type = str(op.get("type") or op.get("op") or "").lower()
         if op_type in {"add", "update"}:
             obj = op.get("object")
             if not isinstance(obj, dict):
@@ -689,7 +856,7 @@ def _apply_prepared_ops(canvas_json: dict[str, Any], ops: list[dict[str, Any]], 
             else:
                 objects.append(obj)
         elif op_type == "remove":
-            obj_id = op.get("obj_id")
+            obj_id = op.get("obj_id") or op.get("object_id")
             if not isinstance(obj_id, str) or not obj_id:
                 continue
             idx = _find_object_index(objects, obj_id)
@@ -714,7 +881,7 @@ def _apply_ops_build_inverse(
     for raw in incoming_ops:
         if not isinstance(raw, dict):
             continue
-        op_type = str(raw.get("type") or "").lower()
+        op_type = str(raw.get("type") or raw.get("op") or "").lower()
         if op_type not in {"add", "update", "remove"}:
             continue
 
@@ -745,7 +912,7 @@ def _apply_ops_build_inverse(
             continue
 
         if op_type == "remove":
-            obj_id = raw.get("obj_id")
+            obj_id = raw.get("obj_id") or raw.get("object_id")
             if not isinstance(obj_id, str) or not obj_id:
                 continue
             idx = _find_object_index(objects, obj_id)
@@ -758,6 +925,35 @@ def _apply_ops_build_inverse(
     canvas_json["objects"] = objects
     inverse_ops.reverse()
     return canvas_json, applied_ops, inverse_ops
+
+
+def _decorate_ops_for_wire(ops: list[dict[str, Any]], session: dict[str, Any]) -> list[dict[str, Any]]:
+    now_ms = int(time.time() * 1000)
+    client_id = str(session.get("client_id") or "")
+    decorated: list[dict[str, Any]] = []
+    for index, op in enumerate(ops, start=1):
+        if not isinstance(op, dict):
+            continue
+        op_name = str(op.get("type") or op.get("op") or "").lower()
+        if op_name not in {"add", "update", "remove"}:
+            continue
+        payload: dict[str, Any] = {
+            "v": 1,
+            "op": op_name,
+            "client_id": client_id,
+            "seq": now_ms + index,
+            "ts": now_ms,
+            "action_id": _new_id(),
+            "surface_id": DEFAULT_SURFACE_ID,
+        }
+        if op_name in {"add", "update"} and isinstance(op.get("object"), dict):
+            payload["object"] = op["object"]
+        obj_id = op.get("obj_id") or op.get("object_id")
+        if isinstance(obj_id, str) and obj_id:
+            payload["obj_id"] = obj_id
+            payload["object_id"] = obj_id
+        decorated.append(payload)
+    return decorated
 
 
 class SocketBoardManager:
@@ -795,12 +991,16 @@ sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=CORS_ORIGINS,
 def _read_board_canvas(conn: sqlite3.Connection, board_id: str) -> dict[str, Any]:
     row = ensure_board_exists(conn, board_id)
     try:
-        return json.loads(row["canvas_json"])
+        raw = json.loads(row["canvas_json"])
     except json.JSONDecodeError:
-        return default_canvas_state()
+        raw = default_canvas_state()
+    if isinstance(raw, dict) and raw.get("type") in {"multi_surface", "lite_canvas_relative"}:
+        raw = _storage_to_runtime_canvas(raw)
+    return _normalize_runtime_canvas(raw)
 
 
 def _save_board_canvas(conn: sqlite3.Connection, board_id: str, canvas_json: dict[str, Any]) -> str:
+    _ensure_board_size_limit(canvas_json)
     updated_at = now_iso()
     conn.execute(
         "UPDATE boards SET canvas_json = ?, updated_at = ? WHERE board_id = ?",
@@ -985,7 +1185,11 @@ async def update(sid: str, data: Any):
                 user_hist["undo"] = user_hist["undo"][-100:]
             user_hist["redo"].clear()
 
-        updated_at = _save_board_canvas(conn, board_id, new_canvas)
+        try:
+            updated_at = _save_board_canvas(conn, board_id, new_canvas)
+        except ValueError:
+            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+            return
     finally:
         conn.close()
 
@@ -1012,6 +1216,15 @@ async def update(sid: str, data: Any):
 
 @sio.event
 async def ops(sid: str, data: Any):
+    await _process_ops_event(sid, data)
+
+
+@sio.event
+async def batch_update(sid: str, data: Any):
+    await _process_ops_event(sid, data)
+
+
+async def _process_ops_event(sid: str, data: Any):
     session = await sio.get_session(sid)
     if not session or not _can_edit(session):
         await sio.emit("error_msg", {"message": "Read-only access"}, to=sid)
@@ -1041,7 +1254,11 @@ async def ops(sid: str, data: Any):
             )
             return
 
-        updated_at = _save_board_canvas(conn, board_id, next_canvas)
+        try:
+            updated_at = _save_board_canvas(conn, board_id, next_canvas)
+        except ValueError:
+            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+            return
     finally:
         conn.close()
 
@@ -1051,17 +1268,10 @@ async def ops(sid: str, data: Any):
         user_hist["undo"] = user_hist["undo"][-200:]
     user_hist["redo"].clear()
 
-    await sio.emit(
-        "ops",
-        {
-            "board_id": board_id,
-            "ops": applied_ops,
-            "updated_at": updated_at,
-            "author": session["user_id"],
-        },
-        room=board_id,
-        skip_sid=sid,
-    )
+    wire_ops = _decorate_ops_for_wire(applied_ops, session)
+    payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
+    await sio.emit("batch_update", payload, room=board_id, skip_sid=sid)
+    await sio.emit("ops", payload, room=board_id, skip_sid=sid)
     await sio.emit(
         "history_state",
         {"undo_available": bool(user_hist["undo"]), "redo_available": bool(user_hist["redo"])},
@@ -1137,22 +1347,20 @@ async def undo(sid: str):
             next_canvas = _apply_undo_action(current, action)
             next_canvas = _normalize_canvas(next_canvas, UserContext(session["user_id"], session["username"], session["jwt_role"], {}))
             applied_ops = []
-        updated_at = _save_board_canvas(conn, board_id, next_canvas)
+        try:
+            updated_at = _save_board_canvas(conn, board_id, next_canvas)
+        except ValueError:
+            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+            return
     finally:
         conn.close()
 
     user_hist["redo"].append(action)
     if applied_ops:
-        await sio.emit(
-            "ops",
-            {
-                "board_id": board_id,
-                "ops": applied_ops,
-                "updated_at": updated_at,
-                "author": session["user_id"],
-            },
-            room=board_id,
-        )
+        wire_ops = _decorate_ops_for_wire(applied_ops, session)
+        payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
+        await sio.emit("batch_update", payload, room=board_id)
+        await sio.emit("ops", payload, room=board_id)
     else:
         await sio.emit(
             "update",
@@ -1198,22 +1406,20 @@ async def redo(sid: str):
             next_canvas = _apply_redo_action_with_added(current, action)
             next_canvas = _normalize_canvas(next_canvas, UserContext(session["user_id"], session["username"], session["jwt_role"], {}))
             applied_ops = []
-        updated_at = _save_board_canvas(conn, board_id, next_canvas)
+        try:
+            updated_at = _save_board_canvas(conn, board_id, next_canvas)
+        except ValueError:
+            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+            return
     finally:
         conn.close()
 
     user_hist["undo"].append(action)
     if applied_ops:
-        await sio.emit(
-            "ops",
-            {
-                "board_id": board_id,
-                "ops": applied_ops,
-                "updated_at": updated_at,
-                "author": session["user_id"],
-            },
-            room=board_id,
-        )
+        wire_ops = _decorate_ops_for_wire(applied_ops, session)
+        payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
+        await sio.emit("batch_update", payload, room=board_id)
+        await sio.emit("ops", payload, room=board_id)
     else:
         await sio.emit(
             "update",

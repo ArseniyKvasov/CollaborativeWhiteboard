@@ -56,6 +56,8 @@
     "linear-gradient(90deg, rgba(17,24,39,0.045) 1px, transparent 1px), linear-gradient(rgba(17,24,39,0.045) 1px, transparent 1px)";
   const LOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/lock-outline.svg\')"></span>';
   const UNLOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/unlock-outline.svg\')"></span>';
+  const MAX_IMAGE_IMPORT_SIDE = 2400;
+  const TARGET_IMAGE_BYTES = 3 * 1024 * 1024;
 
   let currentTool = "select";
   let currentShapeType = "rect";
@@ -328,10 +330,8 @@
         const only = selectedObjects[0];
         const fallbackIndex = fabricCanvas.getObjects().indexOf(only);
         const nextAnchorKey = String(only?.obj_id || only?.id || `idx:${fallbackIndex}`);
-        if (nextAnchorKey !== lockButtonAnchorKey) {
-          placeSelectionLockButton(anchor);
-          lockButtonAnchorKey = nextAnchorKey;
-        }
+        placeSelectionLockButton(anchor);
+        lockButtonAnchorKey = nextAnchorKey;
       } else {
         lockButtonAnchorKey = "";
       }
@@ -960,11 +960,94 @@
   }
 
   function copyActiveSelection() {
-    const objects = getSelectionObjects().filter((obj) => isSyncableObject(obj) && !obj._isDraft);
+    let objects = getSelectionObjects().filter((obj) => isSyncableObject(obj) && !obj._isDraft);
+    if (!objects.length && focusedLockedObject && isObjectOnCanvas(focusedLockedObject) && isSyncableObject(focusedLockedObject)) {
+      objects = [focusedLockedObject];
+    }
     if (!objects.length) return false;
     copiedSelectionPayload = objects.map((obj) => serializeAbsoluteObject(obj));
     pasteShiftCount = 0;
     return true;
+  }
+
+  function estimateDataUrlBytes(dataUrl) {
+    if (typeof dataUrl !== "string") return 0;
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) return 0;
+    const base64 = dataUrl.slice(comma + 1);
+    const padding = base64.endsWith("==") ? 2 : (base64.endsWith("=") ? 1 : 0);
+    return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+  }
+
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("image_read_failed"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function loadImageElement(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("image_decode_failed"));
+      img.src = dataUrl;
+    });
+  }
+
+  function canvasToDataUrl(canvas, mime, quality) {
+    try {
+      return canvas.toDataURL(mime, quality);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  async function optimizeImageFile(file) {
+    const original = await readFileAsDataUrl(file);
+    const img = await loadImageElement(original);
+    const srcW = Math.max(1, Number(img.naturalWidth || img.width || 1));
+    const srcH = Math.max(1, Number(img.naturalHeight || img.height || 1));
+    const scale = Math.min(1, MAX_IMAGE_IMPORT_SIDE / Math.max(srcW, srcH));
+    const dstW = Math.max(1, Math.round(srcW * scale));
+    const dstH = Math.max(1, Math.round(srcH * scale));
+
+    const needResize = dstW !== srcW || dstH !== srcH;
+    const originalBytes = estimateDataUrlBytes(original);
+    if (!needResize && originalBytes <= TARGET_IMAGE_BYTES) return original;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = dstW;
+    canvas.height = dstH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return original;
+    ctx.drawImage(img, 0, 0, dstW, dstH);
+
+    const candidates = [
+      canvasToDataUrl(canvas, "image/webp", 0.86),
+      canvasToDataUrl(canvas, "image/jpeg", 0.86),
+      canvasToDataUrl(canvas, "image/webp", 0.74),
+      canvasToDataUrl(canvas, "image/jpeg", 0.74),
+      canvasToDataUrl(canvas, "image/png"),
+    ].filter(Boolean);
+
+    if (!candidates.length) return original;
+    let best = candidates[0];
+    for (const c of candidates) {
+      if (estimateDataUrlBytes(c) < estimateDataUrlBytes(best)) best = c;
+      if (estimateDataUrlBytes(c) <= TARGET_IMAGE_BYTES) return c;
+    }
+    return best;
+  }
+
+  function showBoardError(message) {
+    const text = String(message || "Ошибка синхронизации доски");
+    console.error(text);
+    if (/15\s*MB|size exceeds|payload|too large/i.test(text)) {
+      alert("Изображение слишком большое для синхронизации. Уменьшите размер/качество и попробуйте снова.");
+    }
   }
 
   function cloneForPaste(jsonObject) {
@@ -1279,7 +1362,7 @@
   }
 
   function addImageAtWorldPoint(dataUrl, worldX, worldY) {
-    fabric.Image.fromURL(dataUrl, { crossOrigin: "anonymous" }).then((img) => {
+    return fabric.Image.fromURL(dataUrl, { crossOrigin: "anonymous" }).then((img) => {
       const maxW = 640;
       const scale = img.width > maxW ? maxW / img.width : 1;
       img.scale(scale);
@@ -1292,7 +1375,21 @@
       enqueueAddOp(img);
       fabricCanvas.setActiveObject(img);
       updateStylePanelVisibility();
+    }).catch((err) => {
+      showBoardError(err?.message || "Не удалось добавить изображение");
     });
+  }
+
+  async function addImageFileAtWorldPoint(file, worldX, worldY) {
+    if (!file || !file.type || !file.type.startsWith("image/")) return;
+    let dataUrl = "";
+    try {
+      dataUrl = await optimizeImageFile(file);
+    } catch (_) {
+      dataUrl = await readFileAsDataUrl(file);
+    }
+    if (!dataUrl) return;
+    await addImageAtWorldPoint(dataUrl, worldX, worldY);
   }
 
   function worldCenterOfViewport() {
@@ -1788,12 +1885,10 @@
   hiddenImageInput.addEventListener("change", () => {
     const file = hiddenImageInput.files && hiddenImageInput.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const center = worldCenterOfViewport();
-      addImageAtWorldPoint(reader.result, center.x, center.y);
-    };
-    reader.readAsDataURL(file);
+    const center = worldCenterOfViewport();
+    addImageFileAtWorldPoint(file, center.x, center.y).catch((err) => {
+      showBoardError(err?.message || "Не удалось загрузить изображение");
+    });
     hiddenImageInput.value = "";
   });
 
@@ -1803,12 +1898,10 @@
     if (!canEdit) return;
     const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith("image/"));
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const p = activeDropWorldPoint(e.clientX, e.clientY);
-      addImageAtWorldPoint(reader.result, p.x, p.y);
-    };
-    reader.readAsDataURL(file);
+    const p = activeDropWorldPoint(e.clientX, e.clientY);
+    addImageFileAtWorldPoint(file, p.x, p.y).catch((err) => {
+      showBoardError(err?.message || "Не удалось загрузить изображение");
+    });
   });
 
   if (strokeWidthEl) {
@@ -2093,7 +2186,7 @@
   });
 
   socket.on("error_msg", (msg) => {
-    console.error(msg?.message || "Socket error");
+    showBoardError(msg?.message || "Socket error");
   });
 
   setInterval(() => {

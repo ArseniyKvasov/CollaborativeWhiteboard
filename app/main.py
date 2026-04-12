@@ -47,6 +47,7 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
 PENDING_OWNER_ID = "__pending_moderator__"
 MAX_BOARD_BYTES = 15 * 1024 * 1024
 DEFAULT_SURFACE_ID = "main"
+SOCKET_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 
 
 @dataclass
@@ -985,7 +986,13 @@ class SocketBoardManager:
 
 
 board_manager = SocketBoardManager()
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=CORS_ORIGINS, logger=False, engineio_logger=False)
+sio = socketio.AsyncServer(
+    async_mode="asgi",
+    cors_allowed_origins=CORS_ORIGINS,
+    logger=False,
+    engineio_logger=False,
+    max_http_buffer_size=SOCKET_MAX_BUFFER_BYTES,
+)
 
 
 def _read_board_canvas(conn: sqlite3.Connection, board_id: str) -> dict[str, Any]:

@@ -42,6 +42,15 @@
       background-size: 24px 24px;
     }
 
+    #boardWrap canvas,
+    #boardWrap .canvas-container,
+    #boardWrap .canvas-container canvas {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+
     #boardWrap.bg-white {
       background: #fff;
     }
@@ -443,7 +452,7 @@
 
   <div class="floating-toolbar" id="toolbar">
     <button class="tool-btn active" data-tool="select" title="Курсор"><span class="bi-local" style="--icon:url('/static/icons/cursor.svg')"></span></button>
-    <button class="tool-btn desktop-only" data-tool="hand" title="Мышка"><span class="bi-local" style="--icon:url('/static/icons/hand-index.svg')"></span></button>
+    <button class="tool-btn" data-tool="hand" title="Ладошка"><span class="bi-local" style="--icon:url('/static/icons/hand-index.svg')"></span></button>
     <button class="tool-btn" data-tool="pencil" id="pencilTool" title="Карандаш"><span class="bi-local" style="--icon:url('/static/icons/pencil.svg')"></span></button>
     <button class="tool-btn" data-tool="shape" id="shapeTool" title="Фигуры"><span class="bi-local" style="--icon:url('/static/icons/diamond.svg')"></span></button>
     <button class="tool-btn" data-tool="text" id="textTool" title="Текст"><span class="bi-local" style="--icon:url('/static/icons/type.svg')"></span></button>
@@ -490,7 +499,6 @@
 
   <div class="floating-panel" id="mobileMorePanel">
     <div class="shape-grid">
-      <button class="shape-btn" id="mobileHandBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/hand-index.svg')"></span></button>
       <button class="shape-btn" id="mobileImageBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/image.svg')"></span></button>
       <button class="shape-btn" id="mobileRotateBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/arrow-repeat.svg')"></span></button>
       <button class="shape-btn" id="mobileBgBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/grid-3x3-gap-fill.svg')"></span></button>
@@ -511,6 +519,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260412-02"></script>
+  <script src="/static/board.js?v=20260412-03"></script>
 </body>
 </html>

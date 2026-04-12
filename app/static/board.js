@@ -14,7 +14,6 @@
   const imageToolBtn = document.getElementById("imageTool");
   const mobileImageBtn = document.getElementById("mobileImageBtn");
   const selectionLockBtn = document.getElementById("selectionLockBtn");
-  const mobileHandBtn = document.getElementById("mobileHandBtn");
   const undoBtn = document.getElementById("undoBtn");
   const redoBtn = document.getElementById("redoBtn");
   const undoRedoDock = document.getElementById("undoRedoDock");
@@ -98,6 +97,7 @@
   let pinchDist = 0;
   let pinchCenter = null;
   let suppressTouchInputUntil = 0;
+  let suppressPathCreatedUntil = 0;
 
   let skipNextTextCreate = false;
   let focusedLockedObject = null;
@@ -491,6 +491,33 @@
     suppressTouchInputUntil = Date.now() + ms;
   }
 
+  function suppressPathCreated(ms = 600) {
+    suppressPathCreatedUntil = Date.now() + ms;
+  }
+
+  function isTouchLikeEvent(evt) {
+    if (!evt) return false;
+    if (evt.pointerType === "touch") return true;
+    if (evt.type && String(evt.type).startsWith("touch")) return true;
+    if (evt.touches || evt.changedTouches) return true;
+    return false;
+  }
+
+  function getClientPoint(evt) {
+    if (!evt) return null;
+    if (Number.isFinite(evt.clientX) && Number.isFinite(evt.clientY)) {
+      return { x: evt.clientX, y: evt.clientY };
+    }
+    const touch =
+      (evt.touches && evt.touches[0]) ||
+      (evt.changedTouches && evt.changedTouches[0]) ||
+      null;
+    if (touch && Number.isFinite(touch.clientX) && Number.isFinite(touch.clientY)) {
+      return { x: touch.clientX, y: touch.clientY };
+    }
+    return null;
+  }
+
   function isTouchInputSuppressed(evt) {
     const touchCount = evt && evt.touches ? evt.touches.length : 0;
     return pinchMode || touchCount > 1 || Date.now() < suppressTouchInputUntil;
@@ -513,7 +540,18 @@
   function startPinch(touches) {
     if (!touches || touches.length < 2) return;
     pinchMode = true;
-    suppressTouchInput();
+    suppressTouchInput(320);
+    suppressPathCreated(1800);
+
+    const active = fabricCanvas.getActiveObject();
+    if (active && active.type === "i-text" && typeof active.exitEditing === "function") {
+      const isEmptyEditingText = !!active.isEditing && String(active.text || "").trim() === "";
+      active.exitEditing();
+      if (isEmptyEditingText) {
+        fabricCanvas.remove(active);
+      }
+    }
+
     cancelTransientCanvasActions();
 
     const [t1, t2] = touches;
@@ -530,7 +568,8 @@
     if (!pinchMode) return;
     pinchMode = false;
     pinchCenter = null;
-    suppressTouchInput();
+    suppressTouchInput(320);
+    suppressPathCreated(700);
     setTool(currentTool);
   }
 
@@ -1708,14 +1747,17 @@
       return;
     }
     const target = opt && opt.target;
-    const panByModifier = evt.button === 1 || (evt.button === 0 && (evt.ctrlKey || evt.metaKey));
-    const panByTool = currentTool === "hand" && evt.button === 0;
+    const point = getClientPoint(evt);
+    const isTouchInput = isTouchLikeEvent(evt);
+    const leftLikeButton = evt.button === 0 || (isTouchInput && evt.button !== 1 && evt.button !== 2);
+    const panByModifier = evt.button === 1 || (leftLikeButton && (evt.ctrlKey || evt.metaKey));
+    const panByTool = currentTool === "hand" && leftLikeButton;
 
     if (panByModifier || panByTool) {
       if (typeof evt.preventDefault === "function") evt.preventDefault();
       if (typeof evt.stopPropagation === "function") evt.stopPropagation();
       panMode = true;
-      panLast = { x: evt.clientX, y: evt.clientY };
+      if (point) panLast = { x: point.x, y: point.y };
       fabricCanvas.defaultCursor = "grabbing";
       return;
     }
@@ -1784,18 +1826,23 @@
       if (typeof evt.preventDefault === "function") evt.preventDefault();
       return;
     }
-    const world = worldFromScreen(evt.offsetX, evt.offsetY);
+    const client = getClientPoint(evt);
+    const rect = boardWrap.getBoundingClientRect();
+    const offsetX = Number.isFinite(evt.offsetX) ? evt.offsetX : (client ? client.x - rect.left : 0);
+    const offsetY = Number.isFinite(evt.offsetY) ? evt.offsetY : (client ? client.y - rect.top : 0);
+    const world = worldFromScreen(offsetX, offsetY);
 
     if (panMode) {
       if (typeof evt.preventDefault === "function") evt.preventDefault();
       const v = fabricCanvas.viewportTransform;
-      const dx = evt.clientX - panLast.x;
-      const dy = evt.clientY - panLast.y;
+      const cur = client || panLast;
+      const dx = cur.x - panLast.x;
+      const dy = cur.y - panLast.y;
       v[4] += dx;
       v[5] += dy;
       const active = fabricCanvas.getActiveObject();
       if (active && typeof active.setCoords === "function") active.setCoords();
-      panLast = { x: evt.clientX, y: evt.clientY };
+      panLast = { x: cur.x, y: cur.y };
       fabricCanvas.requestRenderAll();
       renderRemoteCursors();
       drawMiniMap();
@@ -1884,7 +1931,7 @@
   });
 
   fabricCanvas.on("path:created", (e) => {
-    if (Date.now() < suppressTouchInputUntil) {
+    if (pinchMode || Date.now() < suppressTouchInputUntil || Date.now() < suppressPathCreatedUntil) {
       if (e.path) fabricCanvas.remove(e.path);
       return;
     }
@@ -2125,12 +2172,6 @@
     mobileImageBtn.addEventListener("click", () => {
       if (!canEdit) return;
       hiddenImageInput.click();
-    });
-  }
-  if (mobileHandBtn) {
-    mobileHandBtn.addEventListener("click", () => {
-      hidePanels();
-      setTool("hand");
     });
   }
   if (mobileRotateBtn) {

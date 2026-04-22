@@ -64,15 +64,31 @@ curl http://localhost:8000/health
 docker compose --env-file .env.production -f docker-compose.prod.yml down
 ```
 
-### Local Run
+### Local Run (uvicorn)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000
 ```
+
+Включите debug-режим в `.env` (установите `DEBUG=True`):
+
+```bash
+# пример редактирования:
+# DEBUG=True
+```
+
+Запустите приложение через `uvicorn`:
+
+```bash
+uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000 --env-file .env
+```
+
+Открыть доску без токена в debug-режиме:
+
+- `http://localhost:8000/board/dev-board`
 
 ## Environment
 

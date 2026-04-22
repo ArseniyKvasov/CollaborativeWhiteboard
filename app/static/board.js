@@ -65,12 +65,17 @@
   let currentShapeType = "rect";
   let currentColor = paletteColors[0];
   let currentBackground = "grid";
-  let canEdit = true;
-  let boardRoleCanEdit = true;
+  let canEdit = false;
+  let boardRoleCanEdit = false;
+  let debugForceEdit = false;
   let canClear = false;
   let myJwtRole = "";
   let myClientId = "";
   let myUserId = "";
+  let isSocketConnected = false;
+  let isBoardInitialized = false;
+  let lastConnectionNoticeAt = 0;
+  let hadConnectionDrop = false;
 
   let isRemoteApplying = false;
   let suppressBroadcast = false;
@@ -131,11 +136,12 @@
   })();
 
   const socket = io({
-    transports: ["websocket"],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 500,
     reconnectionDelayMax: 4000,
+    upgrade: true,
+    rememberUpgrade: true,
     timeout: 20000,
     auth: { token, board_id: boardId, history_id: historyClientId },
   });
@@ -379,6 +385,9 @@
     imageToolBtn.disabled = !canEdit;
     if (mobileImageBtn) mobileImageBtn.disabled = !canEdit;
     if (mobileBgBtn) mobileBgBtn.disabled = false;
+    fabricCanvas.isDrawingMode = canEdit && currentTool === "pencil";
+    fabricCanvas.selection = canEdit && currentTool === "select";
+    fabricCanvas.skipTargetFind = !(canEdit && (currentTool === "select" || currentTool === "eraser"));
     syncObjectInteractivity();
     updateLockButtonsState();
     updateRotateButtonState();
@@ -1136,6 +1145,13 @@
     boardNoticeTimer = setTimeout(() => {
       boardNoticeEl.classList.remove("is-visible");
     }, 2400);
+  }
+
+  function showConnectionNotice(message, throttleMs = 2600) {
+    const now = Date.now();
+    if (throttleMs > 0 && now - lastConnectionNoticeAt < throttleMs) return;
+    lastConnectionNoticeAt = now;
+    showBoardNotice(message);
   }
 
   function readFileAsDataUrl(file) {
@@ -2406,32 +2422,74 @@
   });
 
   socket.on("connect", () => {
-    // init приходит от сервера после подключения и переподключения
+    isSocketConnected = true;
+    isBoardInitialized = false;
+    canEdit = debugForceEdit ? true : false;
+    canClear = false;
+    clearBtn.style.display = "none";
+    if (mobileClearBtn) mobileClearBtn.style.display = "none";
+    applyEditPermissions();
   });
 
   socket.on("disconnect", () => {
-    // reconnection managed by socket.io
+    isSocketConnected = false;
+    isBoardInitialized = false;
+    hadConnectionDrop = true;
+    canEdit = false;
+    canClear = false;
+    if (pendingOpsTimer) {
+      clearTimeout(pendingOpsTimer);
+      pendingOpsTimer = null;
+    }
+    pendingOps = [];
+    applyEditPermissions();
+    showConnectionNotice("Связь потеряна. Пытаемся переподключиться…", 0);
     for (const clientId of remoteCursors.keys()) removeRemoteCursor(clientId);
   });
 
+  socket.on("connect_error", (err) => {
+    isSocketConnected = false;
+    isBoardInitialized = false;
+    hadConnectionDrop = true;
+    canEdit = false;
+    canClear = false;
+    applyEditPermissions();
+    showConnectionNotice("Не удается подключиться к доске. Проверяем связь…", 3000);
+  });
+
   socket.on("init", (msg) => {
+    isSocketConnected = true;
+    isBoardInitialized = true;
     myClientId = msg.client_id || "";
     myUserId = msg.user_id || myUserId;
     myJwtRole = msg.jwt_role || myJwtRole;
+    debugForceEdit = !!msg.debug_force_edit;
     boardRoleCanEdit = msg.role === "owner" || msg.role === "editor";
-    canEdit = typeof msg.can_edit === "boolean" ? msg.can_edit : boardRoleCanEdit;
+    canEdit = debugForceEdit
+      ? true
+      : (typeof msg.can_edit === "boolean" ? msg.can_edit : boardRoleCanEdit);
     canClear = !!msg.can_clear;
 
     clearBtn.style.display = canClear ? "inline-flex" : "none";
     if (mobileClearBtn) mobileClearBtn.style.display = canClear ? "inline-flex" : "none";
 
     applyEditPermissions();
+    if (hadConnectionDrop) {
+      showConnectionNotice("Соединение восстановлено", 0);
+      hadConnectionDrop = false;
+    }
 
     applyCanvasState(msg.canvas_json || { version: "6.0.0", objects: [] });
     socket.emit("history_state_request");
   });
 
   socket.on("board_policy", (msg) => {
+    if (!isSocketConnected || !isBoardInitialized) return;
+    if (debugForceEdit) {
+      canEdit = true;
+      applyEditPermissions();
+      return;
+    }
     const allowStudentsDraw = !!(msg && msg.allow_students_draw);
     canEdit = allowStudentsDraw ? boardRoleCanEdit : (myJwtRole === "moderator");
     applyEditPermissions();
@@ -2485,6 +2543,11 @@
     }
   }, 3000);
 
+  setInterval(() => {
+    if (socket.connected) return;
+    socket.connect();
+  }, 6000);
+
   setupObjectStyles();
   buildPalette();
   setShapeType("rect");
@@ -2492,6 +2555,7 @@
   resizeCanvas(true);
   ensureCanvasTransparentBackground();
   updateUndoRedoDockVisibility();
+  applyEditPermissions();
   setTool("select");
   ensureCursorAnimation();
 })();

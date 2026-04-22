@@ -2423,12 +2423,6 @@
 
   socket.on("connect", () => {
     isSocketConnected = true;
-    isBoardInitialized = false;
-    canEdit = debugForceEdit ? true : false;
-    canClear = false;
-    clearBtn.style.display = "none";
-    if (mobileClearBtn) mobileClearBtn.style.display = "none";
-    applyEditPermissions();
   });
 
   socket.on("disconnect", () => {

@@ -2485,7 +2485,7 @@
       return;
     }
     const allowStudentsDraw = !!(msg && msg.allow_students_draw);
-    canEdit = allowStudentsDraw ? boardRoleCanEdit : (myJwtRole === "moderator");
+    canEdit = (myJwtRole === "moderator") || (allowStudentsDraw && boardRoleCanEdit);
     applyEditPermissions();
   });
 

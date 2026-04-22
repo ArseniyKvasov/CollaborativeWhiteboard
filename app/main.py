@@ -1047,6 +1047,8 @@ def _history_actor_key(session: dict[str, Any]) -> str:
 def _can_edit(session: dict[str, Any]) -> bool:
     if DEBUG:
         return True
+    if str(session.get("jwt_role") or "") == "moderator":
+        return True
     board_id = str(session.get("board_id") or "")
     if not board_id:
         return False
@@ -1058,7 +1060,7 @@ def _can_edit(session: dict[str, Any]) -> bool:
         conn.close()
 
     if not allow_students_draw:
-        return str(session.get("jwt_role") or "") == "moderator"
+        return False
     return ROLE_RANK.get(session.get("board_role", "viewer"), 0) >= ROLE_RANK["editor"]
 
 
@@ -1118,7 +1120,9 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
             "can_clear": user.role == "moderator",
             "allow_students_draw": allow_students_draw,
             "debug_force_edit": bool(DEBUG),
-            "can_edit": (user.role == "moderator") if not allow_students_draw else (ROLE_RANK.get(board_role, 0) >= ROLE_RANK["editor"]),
+            "can_edit": (user.role == "moderator") or (
+                allow_students_draw and ROLE_RANK.get(board_role, 0) >= ROLE_RANK["editor"]
+            ),
             "online": board_manager.online_count(board_id),
         },
         to=sid,

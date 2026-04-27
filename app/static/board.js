@@ -2131,7 +2131,8 @@
           fabricCanvas.setActiveObject(target);
         }
         syncITextLayout(target);
-        if (!target.isEditing) {
+        const clickCount = Number(evt && evt.detail || 1);
+        if (clickCount >= 2 && !target.isEditing) {
           target.enterEditing();
           scheduleITextLayoutSync(target, 5, true);
         }
@@ -2280,10 +2281,16 @@
     opt.e.stopPropagation();
   });
 
-  fabricCanvas.on("text:editing:exited", () => {
+  fabricCanvas.on("text:editing:exited", (e) => {
     skipNextTextCreate = true;
-    const active = fabricCanvas.getActiveObject();
-    if (active && active.type === "i-text") enqueueUpdateOp(active);
+    const target = e && e.target;
+    if (!target || target.type !== "i-text") return;
+    const textValue = String(target.text || "").trim();
+    if (!textValue) {
+      fabricCanvas.remove(target);
+      return;
+    }
+    enqueueUpdateOp(target);
   });
 
   fabricCanvas.on("text:editing:entered", (e) => {

@@ -1,7 +1,12 @@
 (() => {
   const body = document.body;
   const boardId = body.dataset.boardId;
-  const token = body.dataset.token || new URLSearchParams(location.search).get("token") || "";
+  const pageToken = body.dataset.token || new URLSearchParams(location.search).get("token") || "";
+  let currentWsToken = body.dataset.wsToken || pageToken;
+  let currentWsTokenExp = Number(body.dataset.wsTokenExp || 0);
+  let wsRefreshToken = body.dataset.wsRefreshToken || "";
+  let wsRefreshTokenExp = Number(body.dataset.wsRefreshTokenExp || 0);
+  let wsTokenRefreshPromise = null;
   const localUsername = body.dataset.username || "user";
 
   const boardWrap = document.getElementById("boardWrap");
@@ -25,6 +30,7 @@
   const mobileBgBtn = document.getElementById("mobileBgBtn");
   const mobileMoreBtn = document.getElementById("mobileMoreBtn");
   const hiddenImageInput = document.getElementById("hiddenImageInput");
+  const hiddenColorInput = document.getElementById("hiddenColorInput");
   const boardNoticeEl = document.getElementById("boardNotice");
 
   const pencilPanel = document.getElementById("pencilPanel");
@@ -49,7 +55,7 @@
     return;
   }
 
-  const paletteColors = ["#1f2937", "#2563eb", "#0f766e", "#7c3aed", "#be123c", "#ea580c", "#16a34a", "#525252"];
+  const paletteColors = ["#1f2937", "#2563eb", "#0f766e", "#7c3aed", "#be123c", "#ea580c", "#16a34a"];
   const cursorColors = ["#0d6efd", "#7c3aed", "#dc2626", "#0f766e", "#ea580c", "#9333ea", "#1d4ed8", "#0891b2"];
   const GRID_WORLD_SIZE = 24;
   const GRID_BG_IMAGE =
@@ -135,15 +141,95 @@
     }
   })();
 
+  function parseJwtExp(tokenValue) {
+    if (!tokenValue) return 0;
+    const chunks = String(tokenValue).split(".");
+    if (chunks.length < 2) return 0;
+    try {
+      const normalized = chunks[1].replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+      const payload = JSON.parse(atob(padded));
+      const exp = Number(payload?.exp || 0);
+      return Number.isFinite(exp) ? exp : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function effectiveTokenExp(tokenValue, fallbackExp) {
+    const parsed = parseJwtExp(tokenValue);
+    if (parsed > 0) return parsed;
+    const fromFallback = Number(fallbackExp || 0);
+    return Number.isFinite(fromFallback) ? fromFallback : 0;
+  }
+
+  function tokenExpiresSoon(expEpochSeconds, skewSeconds = 60) {
+    const exp = Number(expEpochSeconds || 0);
+    if (!Number.isFinite(exp) || exp <= 0) return false;
+    const now = Math.floor(Date.now() / 1000);
+    return exp - now <= skewSeconds;
+  }
+
+  function isAuthConnectError(err) {
+    const message = String(err?.message || "");
+    return /token expired|invalid token|missing token|token missing/i.test(message);
+  }
+
+  async function refreshWsToken(force = false) {
+    if (!wsRefreshToken) return false;
+    if (!force && !tokenExpiresSoon(currentWsTokenExp, 75)) return true;
+    if (wsTokenRefreshPromise) return wsTokenRefreshPromise;
+
+    wsTokenRefreshPromise = (async () => {
+      try {
+        const res = await fetch("/api/ws-token/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            board_id: boardId,
+            refresh_token: wsRefreshToken,
+          }),
+        });
+        if (!res.ok) return false;
+        const payload = await res.json();
+        const nextWsToken = String(payload?.ws_token || "");
+        const nextRefreshToken = String(payload?.ws_refresh_token || "");
+        if (!nextWsToken || !nextRefreshToken) return false;
+        currentWsToken = nextWsToken;
+        currentWsTokenExp = effectiveTokenExp(nextWsToken, payload?.ws_token_exp);
+        wsRefreshToken = nextRefreshToken;
+        wsRefreshTokenExp = effectiveTokenExp(nextRefreshToken, payload?.ws_refresh_token_exp);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    })().finally(() => {
+      wsTokenRefreshPromise = null;
+    });
+
+    return wsTokenRefreshPromise;
+  }
+
+  currentWsTokenExp = effectiveTokenExp(currentWsToken, currentWsTokenExp);
+  wsRefreshTokenExp = effectiveTokenExp(wsRefreshToken, wsRefreshTokenExp);
+
   const socket = io({
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 500,
     reconnectionDelayMax: 4000,
     upgrade: true,
-    rememberUpgrade: true,
+    rememberUpgrade: false,
     timeout: 20000,
-    auth: { token, board_id: boardId, history_id: historyClientId },
+    auth: (cb) => {
+      if (!currentWsToken) {
+        cb({ token: currentWsToken, board_id: boardId, history_id: historyClientId });
+        return;
+      }
+      refreshWsToken(false)
+        .catch(() => false)
+        .finally(() => cb({ token: currentWsToken, board_id: boardId, history_id: historyClientId }));
+    },
   });
 
   const fabricCanvas = new fabric.Canvas(canvasEl, {
@@ -418,6 +504,24 @@
     setBackground(currentBackground === "grid" ? "white" : "grid");
   }
 
+  function normalizeHexColor(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (/^#[0-9a-f]{6}$/.test(raw)) return raw;
+    if (/^#[0-9a-f]{3}$/.test(raw)) {
+      return `#${raw[1]}${raw[1]}${raw[2]}${raw[2]}${raw[3]}${raw[3]}`;
+    }
+    return "";
+  }
+
+  function applyChosenColor(nextColor) {
+    const normalized = normalizeHexColor(nextColor);
+    if (!normalized) return;
+    currentColor = normalized;
+    buildPalette();
+    updateBrush();
+    applyStyleToSelection();
+  }
+
   function buildPalette() {
     palette.innerHTML = "";
     for (const color of paletteColors) {
@@ -427,13 +531,23 @@
       btn.type = "button";
       btn.title = color;
       btn.addEventListener("click", () => {
-        currentColor = color;
-        buildPalette();
-        updateBrush();
-        applyStyleToSelection();
+        applyChosenColor(color);
       });
       palette.appendChild(btn);
     }
+
+    const customBtn = document.createElement("button");
+    const usingCustomColor = !paletteColors.includes(currentColor);
+    customBtn.className = `swatch swatch-picker${usingCustomColor ? " active" : ""}`;
+    customBtn.type = "button";
+    customBtn.title = "Выбрать свой цвет";
+    customBtn.addEventListener("click", () => {
+      if (!hiddenColorInput) return;
+      const normalized = normalizeHexColor(currentColor);
+      if (normalized) hiddenColorInput.value = normalized;
+      hiddenColorInput.click();
+    });
+    palette.appendChild(customBtn);
   }
 
   function updateBrush() {
@@ -1091,6 +1205,38 @@
     return !!(active && active.type === "i-text" && active.isEditing);
   }
 
+  function syncITextLayout(target, keepFocus = false) {
+    if (!target || target.type !== "i-text") return;
+    target.dirty = true;
+    if (typeof target.initDimensions === "function") target.initDimensions();
+    target.setCoords();
+    if (target.isEditing && typeof target._updateTextarea === "function") {
+      target._updateTextarea();
+      if (keepFocus && target.hiddenTextarea && typeof target.hiddenTextarea.focus === "function") {
+        target.hiddenTextarea.focus({ preventScroll: true });
+      }
+    }
+    fabricCanvas.requestRenderAll();
+  }
+
+  function scheduleITextLayoutSync(target, attempts = 4, keepFocus = false) {
+    if (!target || target.type !== "i-text") return;
+    let left = Math.max(1, Number(attempts) || 1);
+    const step = () => {
+      if (!target.canvas) return;
+      syncITextLayout(target, keepFocus);
+      left -= 1;
+      if (left > 0) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  function syncAllITextLayouts() {
+    for (const obj of fabricCanvas.getObjects()) {
+      if (obj && obj.type === "i-text") syncITextLayout(obj);
+    }
+  }
+
   function copyActiveSelection() {
     let objects = getSelectionObjects().filter((obj) => isSyncableObject(obj) && !obj._isDraft);
     if (!objects.length && focusedLockedObject && isObjectOnCanvas(focusedLockedObject) && isSyncableObject(focusedLockedObject)) {
@@ -1336,6 +1482,7 @@
       syncLockStates();
       syncRoundedImages();
       syncNoMirrorObjects();
+      syncAllITextLayouts();
       syncObjectInteractivity();
       restoreSelectionByIds(selectedIds);
       updateStylePanelVisibility();
@@ -1415,6 +1562,7 @@
       }
       syncRoundedImages();
       syncLockStates();
+      syncAllITextLayouts();
       syncObjectInteractivity();
       restoreSelectionByIds(selectedIds);
       updateStylePanelVisibility();
@@ -1848,7 +1996,9 @@
       fabricCanvas.add(text);
       enqueueAddOp(text);
       fabricCanvas.setActiveObject(text);
+      syncITextLayout(text);
       text.enterEditing();
+      scheduleITextLayoutSync(text, 5, true);
       return;
     }
 
@@ -1972,9 +2122,17 @@
     if (active && active.type === "i-text") enqueueUpdateOp(active);
   });
 
+  fabricCanvas.on("text:editing:entered", (e) => {
+    const target = e && e.target;
+    if (target && target.type === "i-text") scheduleITextLayoutSync(target, 5, true);
+  });
+
   fabricCanvas.on("text:changed", (e) => {
     const target = e && e.target;
-    if (target && target.type === "i-text") enqueueTextUpdateDebounced(target);
+    if (target && target.type === "i-text") {
+      syncITextLayout(target, true);
+      enqueueTextUpdateDebounced(target);
+    }
   });
 
   fabricCanvas.on("path:created", (e) => {
@@ -2144,6 +2302,15 @@
     });
     hiddenImageInput.value = "";
   });
+
+  if (hiddenColorInput) {
+    hiddenColorInput.addEventListener("input", () => {
+      applyChosenColor(hiddenColorInput.value);
+    });
+    hiddenColorInput.addEventListener("change", () => {
+      applyChosenColor(hiddenColorInput.value);
+    });
+  }
 
   window.addEventListener("dragover", (e) => {
     if (hasDraggedFiles(e.dataTransfer)) e.preventDefault();
@@ -2316,9 +2483,16 @@
 
   window.addEventListener("resize", () => {
     resizeCanvas(false);
+    syncAllITextLayouts();
     hidePanels();
     updateLockButtonsState();
   });
+
+  if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === "function") {
+    document.fonts.ready.then(() => {
+      syncAllITextLayouts();
+    }).catch(() => {});
+  }
 
   document.addEventListener("click", (e) => {
     const inside = e.target.closest("#toolbar") || e.target.closest(".floating-panel");
@@ -2425,7 +2599,7 @@
     isSocketConnected = true;
   });
 
-  socket.on("disconnect", () => {
+  socket.on("disconnect", (reason) => {
     isSocketConnected = false;
     isBoardInitialized = false;
     hadConnectionDrop = true;
@@ -2439,15 +2613,25 @@
     applyEditPermissions();
     showConnectionNotice("Связь потеряна. Пытаемся переподключиться…", 0);
     for (const clientId of remoteCursors.keys()) removeRemoteCursor(clientId);
+    if (reason === "io server disconnect") socket.connect();
   });
 
-  socket.on("connect_error", (err) => {
+  socket.on("connect_error", async (err) => {
     isSocketConnected = false;
     isBoardInitialized = false;
     hadConnectionDrop = true;
     canEdit = false;
     canClear = false;
     applyEditPermissions();
+    if (isAuthConnectError(err)) {
+      const refreshed = await refreshWsToken(true);
+      if (refreshed && !socket.connected) {
+        socket.connect();
+        return;
+      }
+      showConnectionNotice("Сессия подключения истекла. Обновите страницу.", 0);
+      return;
+    }
     showConnectionNotice("Не удается подключиться к доске. Проверяем связь…", 3000);
   });
 
@@ -2538,9 +2722,13 @@
   }, 3000);
 
   setInterval(() => {
-    if (socket.connected) return;
-    socket.connect();
-  }, 6000);
+    if (!socket.connected) return;
+    if (tokenExpiresSoon(wsRefreshTokenExp, 25)) {
+      refreshWsToken(true).catch(() => false);
+      return;
+    }
+    refreshWsToken(false).catch(() => false);
+  }, 30000);
 
   setupObjectStyles();
   buildPalette();

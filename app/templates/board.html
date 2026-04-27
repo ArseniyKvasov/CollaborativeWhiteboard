@@ -320,6 +320,37 @@
       box-shadow: none;
     }
 
+    .swatch-picker {
+      position: relative;
+      background:
+        conic-gradient(
+          from 180deg at 50% 50%,
+          #ef4444,
+          #f59e0b,
+          #22c55e,
+          #06b6d4,
+          #3b82f6,
+          #8b5cf6,
+          #ec4899,
+          #ef4444
+        );
+    }
+
+    .swatch-picker::after {
+      content: "+";
+      position: absolute;
+      inset: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #0f172a;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
     .mini-wrap {
       position: fixed;
       right: max(14px, var(--safe-right));
@@ -440,6 +471,10 @@
 <body
   data-board-id="{{ board_id }}"
   data-token="{{ token }}"
+  data-ws-token="{{ ws_token }}"
+  data-ws-token-exp="{{ ws_token_exp }}"
+  data-ws-refresh-token="{{ ws_refresh_token }}"
+  data-ws-refresh-token-exp="{{ ws_refresh_token_exp }}"
   data-username="{{ username }}"
   data-user-role="{{ user_role }}"
 >
@@ -516,9 +551,10 @@
   </div>
 
   <input id="hiddenImageInput" type="file" accept="image/*">
+  <input id="hiddenColorInput" type="color" value="#1f2937" style="position:absolute;left:-9999px;opacity:0;pointer-events:none;">
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260422-03"></script>
+  <script src="/static/board.js?v=20260427-01"></script>
 </body>
 </html>

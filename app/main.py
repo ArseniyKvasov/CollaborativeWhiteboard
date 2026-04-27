@@ -28,6 +28,9 @@ CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if 
 DEBUG_RAW = os.getenv("DEBUG", "false")
 DEBUG = str(DEBUG_RAW).strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_USER_ID = os.getenv("DEBUG_USER_ID", "debug-user")
+JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "45"))
+WS_ACCESS_TTL_SECONDS = int(os.getenv("WS_ACCESS_TTL_SECONDS", "300"))
+WS_REFRESH_TTL_SECONDS = int(os.getenv("WS_REFRESH_TTL_SECONDS", "28800"))
 
 app = FastAPI(title="Whiteboard Service", version="1.0.0")
 
@@ -73,6 +76,11 @@ class MemberRequest(BaseModel):
 
 class DrawingPolicyRequest(BaseModel):
     allow_students_draw: bool = True
+
+
+class WsTokenRefreshRequest(BaseModel):
+    board_id: str = Field(min_length=1, max_length=128)
+    refresh_token: str = Field(min_length=1)
 
 
 def get_db() -> sqlite3.Connection:
@@ -142,6 +150,7 @@ def decode_jwt(token: str) -> dict[str, Any]:
             JWT_SECRET,
             algorithms=["HS256"],
             options={"require": ["exp", "user_id"]},
+            leeway=JWT_LEEWAY_SECONDS,
         )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(status_code=401, detail="Token expired") from exc
@@ -152,6 +161,31 @@ def decode_jwt(token: str) -> dict[str, Any]:
     if not user_id:
         raise HTTPException(status_code=401, detail="Token missing user_id")
     return payload
+
+
+def issue_jwt(payload: dict[str, Any], ttl_seconds: int) -> tuple[str, int]:
+    exp = int(time.time()) + max(30, int(ttl_seconds))
+    token_payload = dict(payload)
+    token_payload["exp"] = exp
+    encoded = jwt.encode(token_payload, JWT_SECRET, algorithm="HS256")
+    return encoded, exp
+
+
+def issue_ws_tokens(user: UserContext, board_id: str) -> dict[str, Any]:
+    shared = {
+        "user_id": user.user_id,
+        "username": user.username,
+        "role": user.role,
+        "board_id": board_id,
+    }
+    ws_token, ws_token_exp = issue_jwt({**shared, "type": "ws_access"}, WS_ACCESS_TTL_SECONDS)
+    ws_refresh_token, ws_refresh_token_exp = issue_jwt({**shared, "type": "ws_refresh"}, WS_REFRESH_TTL_SECONDS)
+    return {
+        "ws_token": ws_token,
+        "ws_token_exp": ws_token_exp,
+        "ws_refresh_token": ws_refresh_token,
+        "ws_refresh_token_exp": ws_refresh_token_exp,
+    }
 
 
 def authenticate_request(
@@ -514,16 +548,33 @@ def board_page(request: Request, board_id: str, user: UserContext = Depends(auth
         conn.close()
 
     token = request.query_params.get("token") or parse_bearer(request.headers.get("Authorization"))
+    ws_tokens = issue_ws_tokens(user, board_id)
     return templates.TemplateResponse(
         request,
         "board.html",
         {
             "board_id": board_id,
             "token": token or "",
+            "ws_token": ws_tokens["ws_token"],
+            "ws_token_exp": ws_tokens["ws_token_exp"],
+            "ws_refresh_token": ws_tokens["ws_refresh_token"],
+            "ws_refresh_token_exp": ws_tokens["ws_refresh_token_exp"],
             "username": user.username,
             "user_role": user.role,
         },
     )
+
+
+@app.get("/api/board/{board_id}/ws-token")
+def get_ws_tokens(board_id: str, user: UserContext = Depends(authenticate_request)):
+    conn = get_db()
+    try:
+        ensure_user_board_access(conn, board_id, user)
+        ensure_board_exists(conn, board_id)
+        require_role(conn, board_id, user.user_id, "viewer")
+    finally:
+        conn.close()
+    return issue_ws_tokens(user, board_id)
 
 
 @app.get("/api/board/{board_id}")
@@ -713,7 +764,34 @@ def remove_member(board_id: str, member_id: str, user: UserContext = Depends(aut
         conn.close()
 
 
-def decode_ws_token(token: Optional[str]) -> UserContext:
+@app.post("/api/ws-token/refresh")
+def refresh_ws_token(body: WsTokenRefreshRequest):
+    payload = decode_jwt(body.refresh_token)
+    if str(payload.get("type") or "") != "ws_refresh":
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    token_board_id = str(payload.get("board_id") or "")
+    if token_board_id != body.board_id:
+        raise HTTPException(status_code=403, detail="Refresh token board mismatch")
+
+    user = UserContext(
+        user_id=str(payload["user_id"]),
+        username=str(payload.get("username") or payload.get("name") or payload["user_id"]),
+        role=str(payload.get("role") or "editor"),
+        payload=payload,
+    )
+
+    conn = get_db()
+    try:
+        ensure_user_board_access(conn, body.board_id, user)
+        ensure_board_exists(conn, body.board_id)
+        require_role(conn, body.board_id, user.user_id, "viewer")
+    finally:
+        conn.close()
+
+    return issue_ws_tokens(user, body.board_id)
+
+
+def decode_ws_token(token: Optional[str], expected_board_id: Optional[str] = None) -> UserContext:
     if DEBUG and not token:
         return UserContext(
             user_id=DEBUG_USER_ID,
@@ -724,6 +802,12 @@ def decode_ws_token(token: Optional[str]) -> UserContext:
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
     payload = decode_jwt(token)
+    token_type = str(payload.get("type") or "")
+    if token_type == "ws_refresh":
+        raise HTTPException(status_code=401, detail="Invalid websocket token type")
+    token_board_id = str(payload.get("board_id") or "")
+    if expected_board_id and token_board_id and token_board_id != expected_board_id:
+        raise HTTPException(status_code=403, detail="Websocket token board mismatch")
     return UserContext(
         user_id=str(payload["user_id"]),
         username=str(payload.get("username") or payload.get("name") or payload["user_id"]),
@@ -1071,7 +1155,7 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
         raise ConnectionRefusedError("Missing board_id")
 
     try:
-        user = decode_ws_token(token)
+        user = decode_ws_token(token, expected_board_id=board_id)
     except HTTPException as exc:
         raise ConnectionRefusedError(exc.detail)
 

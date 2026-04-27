@@ -115,6 +115,7 @@
   let suppressPathCreatedUntil = 0;
 
   let skipNextTextCreate = false;
+  let textEditArmedObjId = "";
   let focusedLockedObject = null;
   let lockButtonAnchorKey = "";
 
@@ -400,24 +401,33 @@
   }
 
   function placeSelectionLockButton(anchor) {
-    if (!selectionLockBtn || !anchor || typeof anchor.getBoundingRect !== "function") return;
+    if (!selectionLockBtn || !anchor || typeof anchor.getBoundingRect !== "function") return false;
     const bounds = anchor.getBoundingRect();
-    if (!bounds) return;
+    if (!bounds) return false;
     const topCenter = screenFromWorld(bounds.left + bounds.width / 2, bounds.top);
     const canvasRect = canvasEl.getBoundingClientRect();
+    const absX = canvasRect.left + topCenter.x;
+    const absY = canvasRect.top + topCenter.y;
+    const isOutsideCanvas =
+      absX < canvasRect.left
+      || absX > canvasRect.right
+      || absY < canvasRect.top
+      || absY > canvasRect.bottom;
+    if (isOutsideCanvas) return false;
     const btnW = selectionLockBtn.offsetWidth || 38;
     const btnH = selectionLockBtn.offsetHeight || 38;
     const margin = 10;
     const left = Math.max(
       8,
-      Math.min(window.innerWidth - btnW - 8, canvasRect.left + topCenter.x - btnW / 2),
+      Math.min(window.innerWidth - btnW - 8, absX - btnW / 2),
     );
     const top = Math.max(
       8,
-      Math.min(window.innerHeight - btnH - 8, canvasRect.top + topCenter.y - btnH - margin),
+      Math.min(window.innerHeight - btnH - 8, absY - btnH - margin),
     );
     selectionLockBtn.style.left = `${left}px`;
     selectionLockBtn.style.top = `${top}px`;
+    return true;
   }
 
   function updateLockButtonsState() {
@@ -427,8 +437,8 @@
     const allLocked = hasSingleObject && selectedObjects.every((obj) => isObjectLocked(obj));
     const title = allLocked ? "Разблокировать выделение" : "Блокировать выделение";
     if (selectionLockBtn) {
-      selectionLockBtn.style.display = selectMode && hasSingleObject ? "inline-flex" : "none";
-      selectionLockBtn.disabled = !selectMode || !hasSingleObject;
+      let shouldShow = selectMode && hasSingleObject;
+      selectionLockBtn.disabled = !shouldShow;
       selectionLockBtn.title = title;
       selectionLockBtn.classList.toggle("active", allLocked);
       selectionLockBtn.innerHTML = allLocked ? LOCK_ICON_HTML : UNLOCK_ICON_HTML;
@@ -436,11 +446,12 @@
         const only = selectedObjects[0];
         const fallbackIndex = fabricCanvas.getObjects().indexOf(only);
         const nextAnchorKey = String(only?.obj_id || only?.id || `idx:${fallbackIndex}`);
-        placeSelectionLockButton(anchor);
+        shouldShow = placeSelectionLockButton(anchor);
         lockButtonAnchorKey = nextAnchorKey;
       } else {
         lockButtonAnchorKey = "";
       }
+      selectionLockBtn.style.display = shouldShow ? "inline-flex" : "none";
     }
   }
 
@@ -2128,14 +2139,18 @@
 
     if (currentTool === "text") {
       if (target && isTextObject(target) && typeof target.enterEditing === "function") {
+        const targetId = String(target.obj_id || target.id || "");
         if (fabricCanvas.getActiveObject() !== target) {
           fabricCanvas.setActiveObject(target);
         }
         syncITextLayout(target);
-        const clickCount = Number(evt && evt.detail || 1);
-        if (clickCount >= 2 && !target.isEditing) {
+        const shouldEdit = !!targetId && textEditArmedObjId === targetId;
+        if (shouldEdit && !target.isEditing) {
           target.enterEditing();
           scheduleITextLayoutSync(target, 5, true);
+          textEditArmedObjId = "";
+        } else {
+          textEditArmedObjId = targetId;
         }
         return;
       }
@@ -2146,6 +2161,7 @@
         skipNextTextCreate = false;
         return;
       }
+      textEditArmedObjId = "";
 
       const text = new fabric.IText("", {
         left: p.x,
@@ -2373,6 +2389,7 @@
   });
 
   fabricCanvas.on("selection:created", () => {
+    textEditArmedObjId = "";
     focusedLockedObject = null;
     applySelectionStyles();
     updateStylePanelVisibility();
@@ -2382,6 +2399,7 @@
   });
 
   fabricCanvas.on("selection:updated", () => {
+    textEditArmedObjId = "";
     focusedLockedObject = null;
     applySelectionStyles();
     updateStylePanelVisibility();
@@ -2391,6 +2409,7 @@
   });
 
   fabricCanvas.on("selection:cleared", () => {
+    textEditArmedObjId = "";
     if (stylePanel) stylePanel.classList.remove("active");
     updateUndoRedoDockVisibility();
     updateLockButtonsState();

@@ -637,12 +637,14 @@
     setCustomColorStateFromHex(normalized);
   }
 
-  function applyChosenColor(nextColor) {
+  function applyChosenColor(nextColor, preservePickerState = false) {
     const normalized = normalizeHexColor(nextColor);
     if (!normalized) return;
     currentColor = normalized;
     buildPalette();
-    syncCustomColorInputs(normalized);
+    if (!preservePickerState) {
+      syncCustomColorInputs(normalized);
+    }
     updateBrush();
     applyStyleToSelection();
   }
@@ -2473,7 +2475,7 @@
     customColorState.s = rect.width > 0 ? x / rect.width : 0;
     customColorState.v = rect.height > 0 ? 1 - y / rect.height : 0;
     syncCustomInputsFromState();
-    applyChosenColor(colorFromCustomStateHex());
+    applyChosenColor(colorFromCustomStateHex(), true);
   }
 
   function updateHueByClient(clientX) {
@@ -2483,7 +2485,7 @@
     const nextHue = rect.width > 0 ? (x / rect.width) * 360 : 0;
     customColorState.h = Math.max(0, Math.min(359.999, nextHue));
     syncCustomInputsFromState();
-    applyChosenColor(colorFromCustomStateHex());
+    applyChosenColor(colorFromCustomStateHex(), true);
   }
 
   if (customColorSv) {

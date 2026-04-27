@@ -38,10 +38,6 @@
   const customColorSvCursor = document.getElementById("customColorSvCursor");
   const customColorHue = document.getElementById("customColorHue");
   const customColorHueCursor = document.getElementById("customColorHueCursor");
-  const customColorHex = document.getElementById("customColorHex");
-  const customColorR = document.getElementById("customColorR");
-  const customColorG = document.getElementById("customColorG");
-  const customColorB = document.getElementById("customColorB");
   const textPanel = document.getElementById("textPanel");
   const shapePanel = document.getElementById("shapePanel");
   const stylePanel = document.getElementById("stylePanel");
@@ -523,11 +519,6 @@
     return "";
   }
 
-  function formatHexDisplay(value) {
-    const normalized = normalizeHexColor(value);
-    return normalized ? normalized.toUpperCase() : "";
-  }
-
   function clamp01(value) {
     return Math.max(0, Math.min(1, Number(value) || 0));
   }
@@ -621,12 +612,6 @@
   }
 
   function syncCustomInputsFromState() {
-    const rgb = hsvToRgb(customColorState.h, customColorState.s, customColorState.v);
-    const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
-    if (customColorHex) customColorHex.value = hex.toUpperCase();
-    if (customColorR) customColorR.value = String(rgb.r);
-    if (customColorG) customColorG.value = String(rgb.g);
-    if (customColorB) customColorB.value = String(rgb.b);
     renderCustomColorPicker();
   }
 
@@ -682,8 +667,8 @@
     customBtn.type = "button";
     customBtn.setAttribute("aria-label", "Открыть расширенную палитру");
     customBtn.title = "Выбрать свой цвет";
-    customBtn.innerHTML = '<span class="swatch-custom-dot"></span>';
-    customBtn.addEventListener("click", (e) => {
+    customBtn.innerHTML = "";
+    const openCustomColorPanel = (e) => {
       e.preventDefault();
       e.stopPropagation();
       if (!customColorPanel) return;
@@ -695,15 +680,11 @@
       syncCustomColorInputs(currentColor);
       customColorPanel.classList.add("active");
       requestAnimationFrame(() => {
-        placePanelNear(customColorPanel, customBtn);
+        placeCustomColorPanelUnder(customBtn);
         renderCustomColorPicker();
       });
-      renderCustomColorPicker();
-      if (customColorHex && typeof customColorHex.focus === "function") {
-        customColorHex.focus();
-        customColorHex.select();
-      }
-    });
+    };
+    customBtn.addEventListener("click", openCustomColorPanel);
     palette.appendChild(customBtn);
   }
 
@@ -726,6 +707,17 @@
     textPanel.classList.remove("active");
     if (shapePanel) shapePanel.classList.remove("active");
     if (mobileMorePanel) mobileMorePanel.classList.remove("active");
+  }
+
+  function placeCustomColorPanelUnder(anchorEl) {
+    if (!customColorPanel || !anchorEl) return;
+    const r = anchorEl.getBoundingClientRect();
+    const panelW = customColorPanel.offsetWidth || 220;
+    const panelH = customColorPanel.offsetHeight || 180;
+    const left = Math.max(8, Math.min(window.innerWidth - panelW - 8, r.left + r.width / 2 - panelW / 2));
+    const top = Math.max(8, Math.min(window.innerHeight - panelH - 8, r.bottom + 8));
+    customColorPanel.style.left = `${left}px`;
+    customColorPanel.style.top = `${top}px`;
   }
 
   function placePanelNear(panel, anchorEl) {
@@ -2488,7 +2480,8 @@
     if (!customColorHue) return;
     const rect = customColorHue.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
-    customColorState.h = rect.width > 0 ? (x / rect.width) * 360 : 0;
+    const nextHue = rect.width > 0 ? (x / rect.width) * 360 : 0;
+    customColorState.h = Math.max(0, Math.min(359.999, nextHue));
     syncCustomInputsFromState();
     applyChosenColor(colorFromCustomStateHex());
   }
@@ -2513,56 +2506,6 @@
   });
   window.addEventListener("pointerup", () => {
     customColorDragMode = "";
-  });
-
-  function applyHexFieldColor(closePanel = false) {
-    const normalized = normalizeHexColor(customColorHex ? customColorHex.value : "");
-    if (!normalized) return;
-    setCustomColorStateFromHex(normalized);
-    applyChosenColor(normalized);
-    if (closePanel && customColorPanel) customColorPanel.classList.remove("active");
-  }
-
-  function applyRgbFieldsColor(closePanel = false) {
-    const r = clamp255(customColorR ? customColorR.value : 0);
-    const g = clamp255(customColorG ? customColorG.value : 0);
-    const b = clamp255(customColorB ? customColorB.value : 0);
-    const hex = rgbToHex(r, g, b);
-    setCustomColorStateFromHex(hex);
-    applyChosenColor(hex);
-    if (closePanel && customColorPanel) customColorPanel.classList.remove("active");
-  }
-
-  if (customColorHex) {
-    customColorHex.addEventListener("change", () => applyHexFieldColor(false));
-    customColorHex.addEventListener("blur", () => {
-      const normalized = normalizeHexColor(customColorHex.value);
-      if (normalized) {
-        applyHexFieldColor(false);
-        customColorHex.value = formatHexDisplay(normalized);
-        return;
-      }
-      customColorHex.value = formatHexDisplay(colorFromCustomStateHex());
-    });
-    customColorHex.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter") return;
-      e.preventDefault();
-      applyHexFieldColor(true);
-    });
-  }
-
-  [customColorR, customColorG, customColorB].forEach((input) => {
-    if (!input) return;
-    input.addEventListener("change", () => applyRgbFieldsColor(false));
-    input.addEventListener("blur", () => {
-      applyRgbFieldsColor(false);
-      input.value = String(clamp255(input.value));
-    });
-    input.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter") return;
-      e.preventDefault();
-      applyRgbFieldsColor(true);
-    });
   });
 
   window.addEventListener("dragover", (e) => {
@@ -2748,6 +2691,13 @@
   }
 
   document.addEventListener("click", (e) => {
+    const customOpen = !!(customColorPanel && customColorPanel.classList.contains("active"));
+    const insideCustomPanel = !!(customColorPanel && customColorPanel.contains(e.target));
+    const onCustomTrigger = !!e.target.closest(".swatch-custom-trigger");
+    if (customOpen && !insideCustomPanel && !onCustomTrigger) {
+      customColorPanel.classList.remove("active");
+      return;
+    }
     const inside = e.target.closest("#toolbar") || e.target.closest(".floating-panel");
     if (!inside) hidePanels();
   });

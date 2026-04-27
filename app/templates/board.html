@@ -324,7 +324,6 @@
       position: relative;
       border-radius: 999px;
       background:
-        radial-gradient(circle at 22% 24%, #ffffff 0, #ffffff 10%, transparent 10.5%),
         conic-gradient(
           from 180deg at 50% 50%,
           #ef4444,
@@ -336,38 +335,36 @@
           #ec4899,
           #ef4444
         );
-      border: 1px solid #cfd7e6;
+      border: 1px solid #94a3b8;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
       overflow: hidden;
     }
 
     .swatch-custom-trigger::after {
-      content: "";
+      content: "+";
       position: absolute;
-      right: -2px;
-      bottom: -2px;
-      width: 14px;
-      height: 14px;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 16px;
+      height: 16px;
       border-radius: 999px;
-      background: #0f172a;
-      border: 2px solid #fff;
-      box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.2);
-    }
-
-    .swatch-custom-dot {
-      position: absolute;
-      right: 2px;
-      bottom: 2px;
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: #fff;
-      z-index: 1;
-      pointer-events: none;
+      background: rgba(255, 255, 255, 0.93);
+      border: 1px solid rgba(15, 23, 42, 0.22);
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.2);
+      color: #0f172a;
+      font-size: 14px;
+      line-height: 14px;
+      text-align: center;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
     #customColorPanel {
-      width: 314px;
-      padding: 10px;
+      width: 212px;
+      padding: 7px;
     }
 
     .color-sv {
@@ -398,8 +395,8 @@
     .color-hue {
       position: relative;
       width: 100%;
-      height: 18px;
-      margin-top: 8px;
+      height: 14px;
+      margin-top: 6px;
       border: 1px solid #d0daee;
       border-radius: 4px;
       cursor: ew-resize;
@@ -426,47 +423,6 @@
       box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
       pointer-events: none;
       background: rgba(255, 255, 255, 0.2);
-    }
-
-    .color-inputs {
-      display: grid;
-      grid-template-columns: 1.4fr repeat(3, 1fr);
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .color-input-cell {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      align-items: stretch;
-    }
-
-    .color-input-cell label {
-      margin: 0;
-      text-align: center;
-      color: #475569;
-      font-size: 12px;
-      font-weight: 600;
-    }
-
-    .color-input-cell input {
-      text-align: center;
-      border: 1px solid #cfd7e6;
-      border-radius: 2px;
-      min-height: 40px;
-      font-size: 32px;
-      line-height: 1.1;
-      font-weight: 500;
-      padding: 2px 8px;
-      background: #f3f4f6;
-      color: #111827;
-    }
-
-    #customColorHex {
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      font-size: 28px;
     }
 
     .mini-wrap {
@@ -635,24 +591,6 @@
     </div>
     <div class="color-hue" id="customColorHue">
       <span class="color-hue-cursor" id="customColorHueCursor"></span>
-    </div>
-    <div class="color-inputs">
-      <div class="color-input-cell">
-        <input id="customColorHex" type="text" value="#1F2937" maxlength="7" autocomplete="off" spellcheck="false">
-        <label for="customColorHex">Hex</label>
-      </div>
-      <div class="color-input-cell">
-        <input id="customColorR" type="text" value="31" maxlength="3" autocomplete="off" inputmode="numeric">
-        <label for="customColorR">R</label>
-      </div>
-      <div class="color-input-cell">
-        <input id="customColorG" type="text" value="41" maxlength="3" autocomplete="off" inputmode="numeric">
-        <label for="customColorG">G</label>
-      </div>
-      <div class="color-input-cell">
-        <input id="customColorB" type="text" value="55" maxlength="3" autocomplete="off" inputmode="numeric">
-        <label for="customColorB">B</label>
-      </div>
     </div>
   </div>
 

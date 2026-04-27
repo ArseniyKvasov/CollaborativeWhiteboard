@@ -2124,7 +2124,7 @@
     const p = fabricCanvas.getScenePoint(evt);
 
     if (currentTool === "text") {
-      if (target && target.type === "i-text") {
+      if (target && isTextObject(target) && typeof target.enterEditing === "function") {
         if (fabricCanvas.getActiveObject() !== target) {
           fabricCanvas.setActiveObject(target);
         }
@@ -2137,7 +2137,7 @@
       }
 
       const active = fabricCanvas.getActiveObject();
-      if (active && active.type === "i-text" && active.isEditing) return;
+      if (active && isTextObject(active) && active.isEditing) return;
       if (skipNextTextCreate) {
         skipNextTextCreate = false;
         return;

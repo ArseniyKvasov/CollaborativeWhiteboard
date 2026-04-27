@@ -417,23 +417,17 @@
     const canvasRect = canvasEl.getBoundingClientRect();
     const absX = canvasRect.left + topCenter.x;
     const absY = canvasRect.top + topCenter.y;
-    const isOutsideCanvas =
-      absX < canvasRect.left
-      || absX > canvasRect.right
-      || absY < canvasRect.top
-      || absY > canvasRect.bottom;
-    if (isOutsideCanvas) return false;
     const btnW = selectionLockBtn.offsetWidth || 38;
     const btnH = selectionLockBtn.offsetHeight || 38;
     const margin = 10;
-    const left = Math.max(
-      8,
-      Math.min(window.innerWidth - btnW - 8, absX - btnW / 2),
-    );
-    const top = Math.max(
-      8,
-      Math.min(window.innerHeight - btnH - 8, absY - btnH - margin),
-    );
+    const left = absX - btnW / 2;
+    const top = absY - btnH - margin;
+    const fitsCanvasViewport =
+      left >= canvasRect.left
+      && left + btnW <= canvasRect.right
+      && top >= canvasRect.top
+      && top + btnH <= canvasRect.bottom;
+    if (!fitsCanvasViewport) return false;
     selectionLockBtn.style.left = `${left}px`;
     selectionLockBtn.style.top = `${top}px`;
     return true;

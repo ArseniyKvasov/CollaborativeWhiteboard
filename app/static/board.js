@@ -1897,6 +1897,7 @@
       fabricCanvas.add(img);
       enqueueOps(buildAction("add", { object: serialized }));
       fabricCanvas.setActiveObject(img);
+      setTool("select");
       updateStylePanelVisibility();
     }).catch((err) => {
       showBoardError(err?.message || "Не удалось добавить изображение");

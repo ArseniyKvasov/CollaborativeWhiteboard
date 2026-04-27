@@ -402,9 +402,18 @@
 
   function placeSelectionLockButton(anchor) {
     if (!selectionLockBtn || !anchor || typeof anchor.getBoundingRect !== "function") return false;
+    if (typeof anchor.isOnScreen === "function" && !anchor.isOnScreen()) return false;
     const bounds = anchor.getBoundingRect();
     if (!bounds) return false;
-    const topCenter = screenFromWorld(bounds.left + bounds.width / 2, bounds.top);
+    const bw = Number(bounds.width || 0);
+    const bh = Number(bounds.height || 0);
+    const intersectsCanvas =
+      bounds.left + bw >= 0
+      && bounds.top + bh >= 0
+      && bounds.left <= fabricCanvas.getWidth()
+      && bounds.top <= fabricCanvas.getHeight();
+    if (!intersectsCanvas) return false;
+    const topCenter = { x: bounds.left + bw / 2, y: bounds.top };
     const canvasRect = canvasEl.getBoundingClientRect();
     const absX = canvasRect.left + topCenter.x;
     const absY = canvasRect.top + topCenter.y;
@@ -490,7 +499,7 @@
     if (mobileBgBtn) mobileBgBtn.disabled = false;
     fabricCanvas.isDrawingMode = canEdit && currentTool === "pencil";
     fabricCanvas.selection = canEdit && currentTool === "select";
-    fabricCanvas.skipTargetFind = !(canEdit && (currentTool === "select" || currentTool === "eraser"));
+    fabricCanvas.skipTargetFind = !(canEdit && (currentTool === "select" || currentTool === "eraser" || currentTool === "text"));
     syncObjectInteractivity();
     updateLockButtonsState();
     updateRotateButtonState();
@@ -761,7 +770,7 @@
 
     fabricCanvas.isDrawingMode = canEdit && currentTool === "pencil";
     fabricCanvas.selection = canEdit && currentTool === "select";
-    fabricCanvas.skipTargetFind = !(canEdit && (currentTool === "select" || currentTool === "eraser"));
+    fabricCanvas.skipTargetFind = !(canEdit && (currentTool === "select" || currentTool === "eraser" || currentTool === "text"));
 
     if (currentTool === "hand") {
       fabricCanvas.defaultCursor = "grab";
@@ -917,14 +926,16 @@
   function syncObjectInteractivity() {
     const selectMode = canEdit && currentTool === "select";
     const eraseMode = canEdit && currentTool === "eraser";
+    const textMode = canEdit && currentTool === "text";
 
     fabricCanvas.forEachObject((obj) => {
       const locked = isObjectLocked(obj);
-      obj.selectable = selectMode && !locked;
-      obj.evented = locked ? selectMode : (selectMode || eraseMode);
+      const textEditable = textMode && isTextObject(obj);
+      obj.selectable = (selectMode && !locked) || textEditable;
+      obj.evented = locked ? selectMode : (selectMode || eraseMode || textEditable);
     });
 
-    if (!selectMode) {
+    if (!selectMode && !textMode) {
       focusedLockedObject = null;
       fabricCanvas.discardActiveObject();
     }

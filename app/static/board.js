@@ -34,9 +34,14 @@
 
   const pencilPanel = document.getElementById("pencilPanel");
   const customColorPanel = document.getElementById("customColorPanel");
-  const customColorWheel = document.getElementById("customColorWheel");
+  const customColorSv = document.getElementById("customColorSv");
+  const customColorSvCursor = document.getElementById("customColorSvCursor");
+  const customColorHue = document.getElementById("customColorHue");
+  const customColorHueCursor = document.getElementById("customColorHueCursor");
   const customColorHex = document.getElementById("customColorHex");
-  const customColorApplyBtn = document.getElementById("customColorApplyBtn");
+  const customColorR = document.getElementById("customColorR");
+  const customColorG = document.getElementById("customColorG");
+  const customColorB = document.getElementById("customColorB");
   const textPanel = document.getElementById("textPanel");
   const shapePanel = document.getElementById("shapePanel");
   const stylePanel = document.getElementById("stylePanel");
@@ -121,6 +126,8 @@
   const remoteCursors = new Map();
   const supportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
   const activeTouchPointers = new Map();
+  const customColorState = { h: 217, s: 0.44, v: 0.22 };
+  let customColorDragMode = "";
 
   let miniState = {
     minX: 0,
@@ -521,11 +528,128 @@
     return normalized ? normalized.toUpperCase() : "";
   }
 
+  function clamp01(value) {
+    return Math.max(0, Math.min(1, Number(value) || 0));
+  }
+
+  function clamp255(value) {
+    return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+  }
+
+  function rgbToHex(r, g, b) {
+    const toHex = (n) => clamp255(n).toString(16).padStart(2, "0");
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+
+  function hexToRgb(value) {
+    const hex = normalizeHexColor(value);
+    if (!hex) return null;
+    return {
+      r: Number.parseInt(hex.slice(1, 3), 16),
+      g: Number.parseInt(hex.slice(3, 5), 16),
+      b: Number.parseInt(hex.slice(5, 7), 16),
+    };
+  }
+
+  function hsvToRgb(h, s, v) {
+    const hue = ((Number(h) % 360) + 360) % 360;
+    const sat = clamp01(s);
+    const val = clamp01(v);
+    const c = val * sat;
+    const x = c * (1 - Math.abs((hue / 60) % 2 - 1));
+    const m = val - c;
+    let rp = 0;
+    let gp = 0;
+    let bp = 0;
+    if (hue < 60) {
+      rp = c; gp = x; bp = 0;
+    } else if (hue < 120) {
+      rp = x; gp = c; bp = 0;
+    } else if (hue < 180) {
+      rp = 0; gp = c; bp = x;
+    } else if (hue < 240) {
+      rp = 0; gp = x; bp = c;
+    } else if (hue < 300) {
+      rp = x; gp = 0; bp = c;
+    } else {
+      rp = c; gp = 0; bp = x;
+    }
+    return {
+      r: Math.round((rp + m) * 255),
+      g: Math.round((gp + m) * 255),
+      b: Math.round((bp + m) * 255),
+    };
+  }
+
+  function rgbToHsv(r, g, b) {
+    const rr = clamp255(r) / 255;
+    const gg = clamp255(g) / 255;
+    const bb = clamp255(b) / 255;
+    const max = Math.max(rr, gg, bb);
+    const min = Math.min(rr, gg, bb);
+    const delta = max - min;
+    let h = 0;
+    if (delta !== 0) {
+      if (max === rr) h = ((gg - bb) / delta) % 6;
+      else if (max === gg) h = (bb - rr) / delta + 2;
+      else h = (rr - gg) / delta + 4;
+      h *= 60;
+      if (h < 0) h += 360;
+    }
+    const s = max === 0 ? 0 : delta / max;
+    const v = max;
+    return { h, s, v };
+  }
+
+  function renderCustomColorPicker() {
+    const hueColor = hsvToRgb(customColorState.h, 1, 1);
+    const hueHex = rgbToHex(hueColor.r, hueColor.g, hueColor.b);
+    if (customColorSv) customColorSv.style.backgroundColor = hueHex;
+
+    if (customColorSv && customColorSvCursor) {
+      const rect = customColorSv.getBoundingClientRect();
+      const x = customColorState.s * rect.width;
+      const y = (1 - customColorState.v) * rect.height;
+      customColorSvCursor.style.left = `${x}px`;
+      customColorSvCursor.style.top = `${y}px`;
+    }
+    if (customColorHue && customColorHueCursor) {
+      const rect = customColorHue.getBoundingClientRect();
+      const x = (customColorState.h / 360) * rect.width;
+      customColorHueCursor.style.left = `${x}px`;
+    }
+  }
+
+  function syncCustomInputsFromState() {
+    const rgb = hsvToRgb(customColorState.h, customColorState.s, customColorState.v);
+    const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
+    if (customColorHex) customColorHex.value = hex.toUpperCase();
+    if (customColorR) customColorR.value = String(rgb.r);
+    if (customColorG) customColorG.value = String(rgb.g);
+    if (customColorB) customColorB.value = String(rgb.b);
+    renderCustomColorPicker();
+  }
+
+  function setCustomColorStateFromHex(hexValue) {
+    const rgb = hexToRgb(hexValue);
+    if (!rgb) return false;
+    const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+    customColorState.h = hsv.h;
+    customColorState.s = hsv.s;
+    customColorState.v = hsv.v;
+    syncCustomInputsFromState();
+    return true;
+  }
+
+  function colorFromCustomStateHex() {
+    const rgb = hsvToRgb(customColorState.h, customColorState.s, customColorState.v);
+    return rgbToHex(rgb.r, rgb.g, rgb.b);
+  }
+
   function syncCustomColorInputs(sourceColor = currentColor) {
     const normalized = normalizeHexColor(sourceColor || currentColor);
     if (!normalized) return;
-    if (customColorWheel) customColorWheel.value = normalized;
-    if (customColorHex) customColorHex.value = normalized.toUpperCase();
+    setCustomColorStateFromHex(normalized);
   }
 
   function applyChosenColor(nextColor) {
@@ -567,6 +691,7 @@
       syncCustomColorInputs(currentColor);
       customColorPanel.classList.add("active");
       placePanelNear(customColorPanel, customBtn);
+      renderCustomColorPicker();
       if (customColorHex && typeof customColorHex.focus === "function") {
         customColorHex.focus();
         customColorHex.select();
@@ -2341,45 +2466,97 @@
     hiddenImageInput.value = "";
   });
 
-  if (customColorWheel) {
-    customColorWheel.addEventListener("input", () => {
-      if (!customColorHex) return;
-      customColorHex.value = formatHexDisplay(customColorWheel.value);
+  function updateSvByClient(clientX, clientY) {
+    if (!customColorSv) return;
+    const rect = customColorSv.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const y = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    customColorState.s = rect.width > 0 ? x / rect.width : 0;
+    customColorState.v = rect.height > 0 ? 1 - y / rect.height : 0;
+    syncCustomInputsFromState();
+    applyChosenColor(colorFromCustomStateHex());
+  }
+
+  function updateHueByClient(clientX) {
+    if (!customColorHue) return;
+    const rect = customColorHue.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    customColorState.h = rect.width > 0 ? (x / rect.width) * 360 : 0;
+    syncCustomInputsFromState();
+    applyChosenColor(colorFromCustomStateHex());
+  }
+
+  if (customColorSv) {
+    customColorSv.addEventListener("pointerdown", (e) => {
+      customColorDragMode = "sv";
+      updateSvByClient(e.clientX, e.clientY);
+      customColorSv.setPointerCapture?.(e.pointerId);
     });
-    customColorWheel.addEventListener("change", () => {
-      applyChosenColor(customColorWheel.value);
+  }
+  if (customColorHue) {
+    customColorHue.addEventListener("pointerdown", (e) => {
+      customColorDragMode = "hue";
+      updateHueByClient(e.clientX);
+      customColorHue.setPointerCapture?.(e.pointerId);
     });
+  }
+  window.addEventListener("pointermove", (e) => {
+    if (customColorDragMode === "sv") updateSvByClient(e.clientX, e.clientY);
+    if (customColorDragMode === "hue") updateHueByClient(e.clientX);
+  });
+  window.addEventListener("pointerup", () => {
+    customColorDragMode = "";
+  });
+
+  function applyHexFieldColor(closePanel = false) {
+    const normalized = normalizeHexColor(customColorHex ? customColorHex.value : "");
+    if (!normalized) return;
+    setCustomColorStateFromHex(normalized);
+    applyChosenColor(normalized);
+    if (closePanel && customColorPanel) customColorPanel.classList.remove("active");
+  }
+
+  function applyRgbFieldsColor(closePanel = false) {
+    const r = clamp255(customColorR ? customColorR.value : 0);
+    const g = clamp255(customColorG ? customColorG.value : 0);
+    const b = clamp255(customColorB ? customColorB.value : 0);
+    const hex = rgbToHex(r, g, b);
+    setCustomColorStateFromHex(hex);
+    applyChosenColor(hex);
+    if (closePanel && customColorPanel) customColorPanel.classList.remove("active");
   }
 
   if (customColorHex) {
-    customColorHex.addEventListener("input", () => {
-      const normalized = normalizeHexColor(customColorHex.value);
-      if (normalized && customColorWheel) customColorWheel.value = normalized;
-    });
+    customColorHex.addEventListener("change", () => applyHexFieldColor(false));
     customColorHex.addEventListener("blur", () => {
       const normalized = normalizeHexColor(customColorHex.value);
-      if (normalized) customColorHex.value = normalized.toUpperCase();
+      if (normalized) {
+        applyHexFieldColor(false);
+        customColorHex.value = formatHexDisplay(normalized);
+        return;
+      }
+      customColorHex.value = formatHexDisplay(colorFromCustomStateHex());
     });
     customColorHex.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
-      const normalized = normalizeHexColor(customColorHex.value);
-      if (!normalized) return;
       e.preventDefault();
-      applyChosenColor(normalized);
-      if (customColorPanel) customColorPanel.classList.remove("active");
+      applyHexFieldColor(true);
     });
   }
 
-  if (customColorApplyBtn) {
-    customColorApplyBtn.addEventListener("click", () => {
-      const hex = normalizeHexColor(customColorHex ? customColorHex.value : "");
-      const pick = normalizeHexColor(customColorWheel ? customColorWheel.value : "");
-      const chosen = hex || pick;
-      if (!chosen) return;
-      applyChosenColor(chosen);
-      if (customColorPanel) customColorPanel.classList.remove("active");
+  [customColorR, customColorG, customColorB].forEach((input) => {
+    if (!input) return;
+    input.addEventListener("change", () => applyRgbFieldsColor(false));
+    input.addEventListener("blur", () => {
+      applyRgbFieldsColor(false);
+      input.value = String(clamp255(input.value));
     });
-  }
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      applyRgbFieldsColor(true);
+    });
+  });
 
   window.addEventListener("dragover", (e) => {
     if (hasDraggedFiles(e.dataTransfer)) e.preventDefault();
@@ -2800,6 +2977,7 @@
   }, 30000);
 
   setupObjectStyles();
+  syncCustomColorInputs(currentColor);
   buildPalette();
   setShapeType("rect");
   setBackground("grid");

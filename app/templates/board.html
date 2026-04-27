@@ -352,22 +352,107 @@
     }
 
     #customColorPanel {
-      width: 244px;
+      width: 314px;
+      padding: 10px;
     }
 
-    #customColorWheel {
+    .color-sv {
+      position: relative;
       width: 100%;
-      height: 38px;
-      border-radius: 10px;
+      aspect-ratio: 1 / 1;
       border: 1px solid #d0daee;
-      background: #fff;
-      padding: 2px;
-      cursor: pointer;
+      border-radius: 4px;
+      cursor: crosshair;
+      overflow: hidden;
+      background:
+        linear-gradient(to top, #000, rgba(0, 0, 0, 0)),
+        linear-gradient(to right, #fff, rgba(255, 255, 255, 0));
+    }
+
+    .color-sv-cursor {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      margin-left: -7px;
+      margin-top: -7px;
+      border-radius: 50%;
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+      pointer-events: none;
+    }
+
+    .color-hue {
+      position: relative;
+      width: 100%;
+      height: 18px;
+      margin-top: 8px;
+      border: 1px solid #d0daee;
+      border-radius: 4px;
+      cursor: ew-resize;
+      background: linear-gradient(
+        to right,
+        #f00 0%,
+        #ff0 17%,
+        #0f0 33%,
+        #0ff 50%,
+        #00f 67%,
+        #f0f 83%,
+        #f00 100%
+      );
+    }
+
+    .color-hue-cursor {
+      position: absolute;
+      top: -2px;
+      width: 8px;
+      height: calc(100% + 4px);
+      margin-left: -4px;
+      border-radius: 2px;
+      border: 1px solid #fff;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .color-inputs {
+      display: grid;
+      grid-template-columns: 1.4fr repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .color-input-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      align-items: stretch;
+    }
+
+    .color-input-cell label {
+      margin: 0;
+      text-align: center;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .color-input-cell input {
+      text-align: center;
+      border: 1px solid #cfd7e6;
+      border-radius: 2px;
+      min-height: 40px;
+      font-size: 32px;
+      line-height: 1.1;
+      font-weight: 500;
+      padding: 2px 8px;
+      background: #f3f4f6;
+      color: #111827;
     }
 
     #customColorHex {
       text-transform: uppercase;
       letter-spacing: 0.03em;
+      font-size: 28px;
     }
 
     .mini-wrap {
@@ -531,12 +616,29 @@
   </div>
 
   <div class="floating-panel" id="customColorPanel">
-    <label class="form-label small mb-1 d-block">Любой цвет</label>
-    <input id="customColorWheel" type="color" value="#1f2937" aria-label="Выбор цвета">
-    <label class="form-label small mb-1 mt-2 d-block">HEX-код</label>
-    <input id="customColorHex" class="form-control form-control-sm" type="text" value="#1F2937" maxlength="7" autocomplete="off" spellcheck="false">
-    <div class="d-flex justify-content-end mt-2">
-      <button class="btn btn-sm btn-primary" id="customColorApplyBtn" type="button">Применить</button>
+    <div class="color-sv" id="customColorSv">
+      <span class="color-sv-cursor" id="customColorSvCursor"></span>
+    </div>
+    <div class="color-hue" id="customColorHue">
+      <span class="color-hue-cursor" id="customColorHueCursor"></span>
+    </div>
+    <div class="color-inputs">
+      <div class="color-input-cell">
+        <input id="customColorHex" type="text" value="#1F2937" maxlength="7" autocomplete="off" spellcheck="false">
+        <label for="customColorHex">Hex</label>
+      </div>
+      <div class="color-input-cell">
+        <input id="customColorR" type="text" value="31" maxlength="3" autocomplete="off" inputmode="numeric">
+        <label for="customColorR">R</label>
+      </div>
+      <div class="color-input-cell">
+        <input id="customColorG" type="text" value="41" maxlength="3" autocomplete="off" inputmode="numeric">
+        <label for="customColorG">G</label>
+      </div>
+      <div class="color-input-cell">
+        <input id="customColorB" type="text" value="55" maxlength="3" autocomplete="off" inputmode="numeric">
+        <label for="customColorB">B</label>
+      </div>
     </div>
   </div>
 

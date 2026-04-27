@@ -678,10 +678,14 @@
 
     const customBtn = document.createElement("button");
     const usingCustomColor = !paletteColors.includes(currentColor);
-    customBtn.className = `swatch swatch-picker${usingCustomColor ? " active" : ""}`;
+    customBtn.className = `swatch swatch-custom-trigger${usingCustomColor ? " active" : ""}`;
     customBtn.type = "button";
+    customBtn.setAttribute("aria-label", "Открыть расширенную палитру");
     customBtn.title = "Выбрать свой цвет";
-    customBtn.addEventListener("click", () => {
+    customBtn.innerHTML = '<span class="swatch-custom-dot"></span>';
+    customBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       if (!customColorPanel) return;
       const isOpen = customColorPanel.classList.contains("active");
       if (isOpen) {
@@ -690,7 +694,10 @@
       }
       syncCustomColorInputs(currentColor);
       customColorPanel.classList.add("active");
-      placePanelNear(customColorPanel, customBtn);
+      requestAnimationFrame(() => {
+        placePanelNear(customColorPanel, customBtn);
+        renderCustomColorPicker();
+      });
       renderCustomColorPicker();
       if (customColorHex && typeof customColorHex.focus === "function") {
         customColorHex.focus();

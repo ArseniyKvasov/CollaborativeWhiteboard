@@ -320,9 +320,11 @@
       box-shadow: none;
     }
 
-    .swatch-picker {
+    .swatch-custom-trigger {
       position: relative;
+      border-radius: 999px;
       background:
+        radial-gradient(circle at 22% 24%, #ffffff 0, #ffffff 10%, transparent 10.5%),
         conic-gradient(
           from 180deg at 50% 50%,
           #ef4444,
@@ -334,21 +336,33 @@
           #ec4899,
           #ef4444
         );
+      border: 1px solid #cfd7e6;
+      overflow: hidden;
     }
 
-    .swatch-picker::after {
-      content: "+";
+    .swatch-custom-trigger::after {
+      content: "";
       position: absolute;
-      inset: 4px;
+      right: -2px;
+      bottom: -2px;
+      width: 14px;
+      height: 14px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.92);
-      color: #0f172a;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 17px;
-      font-weight: 700;
-      line-height: 1;
+      background: #0f172a;
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.2);
+    }
+
+    .swatch-custom-dot {
+      position: absolute;
+      right: 2px;
+      bottom: 2px;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #fff;
+      z-index: 1;
+      pointer-events: none;
     }
 
     #customColorPanel {

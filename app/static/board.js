@@ -30,10 +30,13 @@
   const mobileBgBtn = document.getElementById("mobileBgBtn");
   const mobileMoreBtn = document.getElementById("mobileMoreBtn");
   const hiddenImageInput = document.getElementById("hiddenImageInput");
-  const hiddenColorInput = document.getElementById("hiddenColorInput");
   const boardNoticeEl = document.getElementById("boardNotice");
 
   const pencilPanel = document.getElementById("pencilPanel");
+  const customColorPanel = document.getElementById("customColorPanel");
+  const customColorWheel = document.getElementById("customColorWheel");
+  const customColorHex = document.getElementById("customColorHex");
+  const customColorApplyBtn = document.getElementById("customColorApplyBtn");
   const textPanel = document.getElementById("textPanel");
   const shapePanel = document.getElementById("shapePanel");
   const stylePanel = document.getElementById("stylePanel");
@@ -513,11 +516,24 @@
     return "";
   }
 
+  function formatHexDisplay(value) {
+    const normalized = normalizeHexColor(value);
+    return normalized ? normalized.toUpperCase() : "";
+  }
+
+  function syncCustomColorInputs(sourceColor = currentColor) {
+    const normalized = normalizeHexColor(sourceColor || currentColor);
+    if (!normalized) return;
+    if (customColorWheel) customColorWheel.value = normalized;
+    if (customColorHex) customColorHex.value = normalized.toUpperCase();
+  }
+
   function applyChosenColor(nextColor) {
     const normalized = normalizeHexColor(nextColor);
     if (!normalized) return;
     currentColor = normalized;
     buildPalette();
+    syncCustomColorInputs(normalized);
     updateBrush();
     applyStyleToSelection();
   }
@@ -542,10 +558,19 @@
     customBtn.type = "button";
     customBtn.title = "Выбрать свой цвет";
     customBtn.addEventListener("click", () => {
-      if (!hiddenColorInput) return;
-      const normalized = normalizeHexColor(currentColor);
-      if (normalized) hiddenColorInput.value = normalized;
-      hiddenColorInput.click();
+      if (!customColorPanel) return;
+      const isOpen = customColorPanel.classList.contains("active");
+      if (isOpen) {
+        customColorPanel.classList.remove("active");
+        return;
+      }
+      syncCustomColorInputs(currentColor);
+      customColorPanel.classList.add("active");
+      placePanelNear(customColorPanel, customBtn);
+      if (customColorHex && typeof customColorHex.focus === "function") {
+        customColorHex.focus();
+        customColorHex.select();
+      }
     });
     palette.appendChild(customBtn);
   }
@@ -565,6 +590,7 @@
 
   function hidePanels() {
     pencilPanel.classList.remove("active");
+    if (customColorPanel) customColorPanel.classList.remove("active");
     textPanel.classList.remove("active");
     if (shapePanel) shapePanel.classList.remove("active");
     if (mobileMorePanel) mobileMorePanel.classList.remove("active");
@@ -1974,6 +2000,18 @@
     const p = fabricCanvas.getScenePoint(evt);
 
     if (currentTool === "text") {
+      if (target && target.type === "i-text") {
+        if (fabricCanvas.getActiveObject() !== target) {
+          fabricCanvas.setActiveObject(target);
+        }
+        syncITextLayout(target);
+        if (!target.isEditing) {
+          target.enterEditing();
+          scheduleITextLayoutSync(target, 5, true);
+        }
+        return;
+      }
+
       const active = fabricCanvas.getActiveObject();
       if (active && active.type === "i-text" && active.isEditing) return;
       if (skipNextTextCreate) {
@@ -2303,12 +2341,43 @@
     hiddenImageInput.value = "";
   });
 
-  if (hiddenColorInput) {
-    hiddenColorInput.addEventListener("input", () => {
-      applyChosenColor(hiddenColorInput.value);
+  if (customColorWheel) {
+    customColorWheel.addEventListener("input", () => {
+      if (!customColorHex) return;
+      customColorHex.value = formatHexDisplay(customColorWheel.value);
     });
-    hiddenColorInput.addEventListener("change", () => {
-      applyChosenColor(hiddenColorInput.value);
+    customColorWheel.addEventListener("change", () => {
+      applyChosenColor(customColorWheel.value);
+    });
+  }
+
+  if (customColorHex) {
+    customColorHex.addEventListener("input", () => {
+      const normalized = normalizeHexColor(customColorHex.value);
+      if (normalized && customColorWheel) customColorWheel.value = normalized;
+    });
+    customColorHex.addEventListener("blur", () => {
+      const normalized = normalizeHexColor(customColorHex.value);
+      if (normalized) customColorHex.value = normalized.toUpperCase();
+    });
+    customColorHex.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const normalized = normalizeHexColor(customColorHex.value);
+      if (!normalized) return;
+      e.preventDefault();
+      applyChosenColor(normalized);
+      if (customColorPanel) customColorPanel.classList.remove("active");
+    });
+  }
+
+  if (customColorApplyBtn) {
+    customColorApplyBtn.addEventListener("click", () => {
+      const hex = normalizeHexColor(customColorHex ? customColorHex.value : "");
+      const pick = normalizeHexColor(customColorWheel ? customColorWheel.value : "");
+      const chosen = hex || pick;
+      if (!chosen) return;
+      applyChosenColor(chosen);
+      if (customColorPanel) customColorPanel.classList.remove("active");
     });
   }
 

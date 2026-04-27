@@ -351,6 +351,25 @@
       line-height: 1;
     }
 
+    #customColorPanel {
+      width: 244px;
+    }
+
+    #customColorWheel {
+      width: 100%;
+      height: 38px;
+      border-radius: 10px;
+      border: 1px solid #d0daee;
+      background: #fff;
+      padding: 2px;
+      cursor: pointer;
+    }
+
+    #customColorHex {
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
     .mini-wrap {
       position: fixed;
       right: max(14px, var(--safe-right));
@@ -511,6 +530,16 @@
     <input id="strokeWidth" class="form-range w-100" type="range" min="1" max="32" value="2">
   </div>
 
+  <div class="floating-panel" id="customColorPanel">
+    <label class="form-label small mb-1 d-block">Любой цвет</label>
+    <input id="customColorWheel" type="color" value="#1f2937" aria-label="Выбор цвета">
+    <label class="form-label small mb-1 mt-2 d-block">HEX-код</label>
+    <input id="customColorHex" class="form-control form-control-sm" type="text" value="#1F2937" maxlength="7" autocomplete="off" spellcheck="false">
+    <div class="d-flex justify-content-end mt-2">
+      <button class="btn btn-sm btn-primary" id="customColorApplyBtn" type="button">Применить</button>
+    </div>
+  </div>
+
   <div class="floating-panel" id="textPanel">
     <label class="form-label small mb-1 d-block">Размер текста</label>
     <input id="textSize" class="form-range w-100" type="range" min="12" max="96" value="24">
@@ -551,7 +580,6 @@
   </div>
 
   <input id="hiddenImageInput" type="file" accept="image/*">
-  <input id="hiddenColorInput" type="color" value="#1f2937" style="position:absolute;left:-9999px;opacity:0;pointer-events:none;">
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>

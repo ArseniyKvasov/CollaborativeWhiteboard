@@ -121,6 +121,18 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS board_ops (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id TEXT NOT NULL,
+                op_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_board_ops_board_id_id ON board_ops(board_id, id)")
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(boards)").fetchall()}
         if "allow_students_draw" not in cols:
             conn.execute("ALTER TABLE boards ADD COLUMN allow_students_draw INTEGER NOT NULL DEFAULT 1")
@@ -609,11 +621,7 @@ def save_board_state(board_id: str, body: SaveBoardRequest, user: UserContext = 
             _ensure_board_size_limit(next_canvas)
         except ValueError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
-        updated_at = now_iso()
-        conn.execute(
-            "UPDATE boards SET canvas_json = ?, updated_at = ? WHERE board_id = ?",
-            (json.dumps(next_canvas, ensure_ascii=False), updated_at, board_id),
-        )
+        updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
         conn.commit()
         return {"ok": True, "board_id": board_id, "updated_at": updated_at}
     finally:
@@ -1087,17 +1095,46 @@ def _read_board_canvas(conn: sqlite3.Connection, board_id: str) -> dict[str, Any
         raw = default_canvas_state()
     if isinstance(raw, dict) and raw.get("type") in {"multi_surface", "lite_canvas_relative"}:
         raw = _storage_to_runtime_canvas(raw)
-    return _normalize_runtime_canvas(raw)
+    canvas = _normalize_runtime_canvas(raw)
+    rows = conn.execute("SELECT op_json FROM board_ops WHERE board_id = ? ORDER BY id ASC", (board_id,)).fetchall()
+    if not rows:
+        return canvas
+    ops: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            op = json.loads(r["op_json"])
+        except Exception:
+            op = None
+        if isinstance(op, dict):
+            ops.append(op)
+    if not ops:
+        return canvas
+    return _apply_prepared_ops(canvas, ops, UserContext("system", "system", "system", {}))
 
 
-def _save_board_canvas(conn: sqlite3.Connection, board_id: str, canvas_json: dict[str, Any]) -> str:
+def _replace_board_canvas_baseline(conn: sqlite3.Connection, board_id: str, canvas_json: dict[str, Any]) -> str:
     _ensure_board_size_limit(canvas_json)
     updated_at = now_iso()
     conn.execute(
         "UPDATE boards SET canvas_json = ?, updated_at = ? WHERE board_id = ?",
         (json.dumps(canvas_json, ensure_ascii=False), updated_at, board_id),
     )
-    conn.commit()
+    conn.execute("DELETE FROM board_ops WHERE board_id = ?", (board_id,))
+    return updated_at
+
+
+def _append_board_ops(conn: sqlite3.Connection, board_id: str, ops: list[dict[str, Any]]) -> str:
+    if not ops:
+        updated_at = now_iso()
+        conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
+        return updated_at
+    ts = now_iso()
+    conn.executemany(
+        "INSERT INTO board_ops (board_id, op_json, created_at) VALUES (?, ?, ?)",
+        [(board_id, json.dumps(op, ensure_ascii=False), ts) for op in ops],
+    )
+    updated_at = now_iso()
+    conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
     return updated_at
 
 
@@ -1270,8 +1307,10 @@ async def update(sid: str, data: Any):
     )
     new_canvas = _normalize_canvas(data["canvas_json"], user)
 
+    applied_ops: list[dict[str, Any]] = []
     conn = get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         old_canvas = _read_board_canvas(conn, board_id)
         action = _build_action(old_canvas, new_canvas)
         if action:
@@ -1283,28 +1322,56 @@ async def update(sid: str, data: Any):
                 user_hist["undo"] = user_hist["undo"][-100:]
             user_hist["redo"].clear()
 
+            added_ids = set(action.get("added_ids", []))
+            for obj in action.get("added_objects", []):
+                if isinstance(obj, dict):
+                    applied_ops.append({"type": "add", "object": obj})
+            for obj in action.get("modified_after", []):
+                if isinstance(obj, dict) and obj.get("obj_id") not in added_ids:
+                    applied_ops.append({"type": "update", "object": obj})
+            for obj in action.get("removed_objects", []):
+                obj_id = obj.get("obj_id") if isinstance(obj, dict) else None
+                if isinstance(obj_id, str) and obj_id:
+                    applied_ops.append({"type": "remove", "obj_id": obj_id})
+
         try:
-            updated_at = _save_board_canvas(conn, board_id, new_canvas)
+            _ensure_board_size_limit(new_canvas)
+            updated_at = _append_board_ops(conn, board_id, applied_ops)
+            conn.commit()
         except ValueError:
+            conn.rollback()
             await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
             return
     finally:
         conn.close()
 
     user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
-    await sio.emit(
-        "update",
-        {
+    if applied_ops:
+        wire_ops = _decorate_ops_for_wire(applied_ops, session)
+        payload = {
             "board_id": board_id,
-            "canvas_json": new_canvas,
+            "ops": wire_ops,
             "updated_at": updated_at,
             "author": session["user_id"],
             "undo_available": bool(user_hist["undo"]),
             "redo_available": bool(user_hist["redo"]),
-        },
-        room=board_id,
-        skip_sid=sid,
-    )
+        }
+        await sio.emit("batch_update", payload, room=board_id, skip_sid=sid)
+        await sio.emit("ops", payload, room=board_id, skip_sid=sid)
+    else:
+        await sio.emit(
+            "update",
+            {
+                "board_id": board_id,
+                "canvas_json": new_canvas,
+                "updated_at": updated_at,
+                "author": session["user_id"],
+                "undo_available": bool(user_hist["undo"]),
+                "redo_available": bool(user_hist["redo"]),
+            },
+            room=board_id,
+            skip_sid=sid,
+        )
     await sio.emit(
         "history_state",
         {"undo_available": bool(user_hist["undo"]), "redo_available": bool(user_hist["redo"])},
@@ -1341,9 +1408,11 @@ async def _process_ops_event(sid: str, data: Any):
 
     conn = get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         current = _read_board_canvas(conn, board_id)
         next_canvas, applied_ops, inverse_ops = _apply_ops_build_inverse(current, data["ops"], user)
         if not applied_ops:
+            conn.commit()
             hist = board_manager.get_user_history(board_id, _history_actor_key(session))
             await sio.emit(
                 "history_state",
@@ -1353,8 +1422,11 @@ async def _process_ops_event(sid: str, data: Any):
             return
 
         try:
-            updated_at = _save_board_canvas(conn, board_id, next_canvas)
+            _ensure_board_size_limit(next_canvas)
+            updated_at = _append_board_ops(conn, board_id, applied_ops)
+            conn.commit()
         except ValueError:
+            conn.rollback()
             await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
             return
     finally:
@@ -1388,7 +1460,11 @@ async def clear(sid: str):
     cleared = default_canvas_state()
     conn = get_db()
     try:
-        updated_at = _save_board_canvas(conn, board_id, cleared)
+        conn.execute("BEGIN IMMEDIATE")
+        updated_at = now_iso()
+        conn.execute("DELETE FROM board_ops WHERE board_id = ?", (board_id,))
+        conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
+        conn.commit()
     finally:
         conn.close()
     board_manager.history[board_id] = {}
@@ -1433,6 +1509,7 @@ async def undo(sid: str):
     action = user_hist["undo"].pop()
     conn = get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         current = _read_board_canvas(conn, board_id)
         if isinstance(action, dict) and isinstance(action.get("undo_ops"), list):
             applied_ops = action["undo_ops"]
@@ -1446,8 +1523,14 @@ async def undo(sid: str):
             next_canvas = _normalize_canvas(next_canvas, UserContext(session["user_id"], session["username"], session["jwt_role"], {}))
             applied_ops = []
         try:
-            updated_at = _save_board_canvas(conn, board_id, next_canvas)
+            _ensure_board_size_limit(next_canvas)
+            if applied_ops:
+                updated_at = _append_board_ops(conn, board_id, applied_ops)
+            else:
+                updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
+            conn.commit()
         except ValueError:
+            conn.rollback()
             await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
             return
     finally:
@@ -1492,6 +1575,7 @@ async def redo(sid: str):
     action = user_hist["redo"].pop()
     conn = get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         current = _read_board_canvas(conn, board_id)
         if isinstance(action, dict) and isinstance(action.get("redo_ops"), list):
             applied_ops = action["redo_ops"]
@@ -1505,8 +1589,14 @@ async def redo(sid: str):
             next_canvas = _normalize_canvas(next_canvas, UserContext(session["user_id"], session["username"], session["jwt_role"], {}))
             applied_ops = []
         try:
-            updated_at = _save_board_canvas(conn, board_id, next_canvas)
+            _ensure_board_size_limit(next_canvas)
+            if applied_ops:
+                updated_at = _append_board_ops(conn, board_id, applied_ops)
+            else:
+                updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
+            conn.commit()
         except ValueError:
+            conn.rollback()
             await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
             return
     finally:

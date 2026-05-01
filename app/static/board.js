@@ -403,6 +403,7 @@
   function placeSelectionLockButton(anchor) {
     if (!selectionLockBtn || !anchor || typeof anchor.getBoundingRect !== "function") return false;
     if (typeof anchor.isOnScreen === "function" && !anchor.isOnScreen()) return false;
+    if (typeof anchor.setCoords === "function") anchor.setCoords();
     const bounds = anchor.getBoundingRect();
     if (!bounds) return false;
     const bw = Number(bounds.width || 0);
@@ -413,8 +414,30 @@
       && bounds.left <= fabricCanvas.getWidth()
       && bounds.top <= fabricCanvas.getHeight();
     if (!intersectsCanvas) return false;
-    const topCenter = { x: bounds.left + bw / 2, y: bounds.top };
+    let worldX = bounds.left + bw / 2;
+    let worldY = bounds.top;
+    if (typeof anchor.getCoords === "function") {
+      const coords = anchor.getCoords();
+      if (Array.isArray(coords) && coords.length) {
+        let minY = Number.POSITIVE_INFINITY;
+        let minX = Number.POSITIVE_INFINITY;
+        let maxX = Number.NEGATIVE_INFINITY;
+        coords.forEach((pt) => {
+          const px = Number(pt?.x);
+          const py = Number(pt?.y);
+          if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+          if (py < minY) minY = py;
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+        });
+        if (Number.isFinite(minY) && Number.isFinite(minX) && Number.isFinite(maxX)) {
+          worldX = (minX + maxX) / 2;
+          worldY = minY;
+        }
+      }
+    }
     const canvasRect = canvasEl.getBoundingClientRect();
+    const topCenter = screenFromWorld(worldX, worldY);
     const absX = canvasRect.left + topCenter.x;
     const absY = canvasRect.top + topCenter.y;
     const btnW = selectionLockBtn.offsetWidth || 38;
@@ -422,12 +445,6 @@
     const margin = 10;
     const left = absX - btnW / 2;
     const top = absY - btnH - margin;
-    const fitsCanvasViewport =
-      left >= canvasRect.left
-      && left + btnW <= canvasRect.right
-      && top >= canvasRect.top
-      && top + btnH <= canvasRect.bottom;
-    if (!fitsCanvasViewport) return false;
     selectionLockBtn.style.left = `${left}px`;
     selectionLockBtn.style.top = `${top}px`;
     return true;

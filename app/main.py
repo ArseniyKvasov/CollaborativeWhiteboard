@@ -51,6 +51,8 @@ PENDING_OWNER_ID = "__pending_moderator__"
 MAX_BOARD_BYTES = 15 * 1024 * 1024
 DEFAULT_SURFACE_ID = "main"
 SOCKET_MAX_BUFFER_BYTES = 20 * 1024 * 1024
+OPS_COMPACT_COUNT_THRESHOLD = 700
+OPS_COMPACT_BYTES_THRESHOLD = 4 * 1024 * 1024
 
 
 @dataclass
@@ -1109,7 +1111,12 @@ def _read_board_canvas(conn: sqlite3.Connection, board_id: str) -> dict[str, Any
             ops.append(op)
     if not ops:
         return canvas
-    return _apply_prepared_ops(canvas, ops, UserContext("system", "system", "system", {}))
+    try:
+        return _apply_prepared_ops(canvas, ops, UserContext("system", "system", "system", {}))
+    except Exception as exc:
+        # Keep board available even if some persisted op chain is broken.
+        print(f"[board:{board_id}] failed to replay ops, using baseline canvas: {exc}")
+        return canvas
 
 
 def _replace_board_canvas_baseline(conn: sqlite3.Connection, board_id: str, canvas_json: dict[str, Any]) -> str:
@@ -1133,6 +1140,24 @@ def _append_board_ops(conn: sqlite3.Connection, board_id: str, ops: list[dict[st
         "INSERT INTO board_ops (board_id, op_json, created_at) VALUES (?, ?, ?)",
         [(board_id, json.dumps(op, ensure_ascii=False), ts) for op in ops],
     )
+    compact_stats = conn.execute(
+        "SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(op_json)), 0) AS bytes FROM board_ops WHERE board_id = ?",
+        (board_id,),
+    ).fetchone()
+    op_count = int(compact_stats["cnt"]) if compact_stats else 0
+    op_bytes = int(compact_stats["bytes"]) if compact_stats else 0
+    if op_count >= OPS_COMPACT_COUNT_THRESHOLD or op_bytes >= OPS_COMPACT_BYTES_THRESHOLD:
+        try:
+            compacted_canvas = _read_board_canvas(conn, board_id)
+            _ensure_board_size_limit(compacted_canvas)
+            conn.execute(
+                "UPDATE boards SET canvas_json = ? WHERE board_id = ?",
+                (json.dumps(compacted_canvas, ensure_ascii=False), board_id),
+            )
+            conn.execute("DELETE FROM board_ops WHERE board_id = ?", (board_id,))
+        except Exception as exc:
+            # Do not break user operations if compaction fails.
+            print(f"[board:{board_id}] op compaction skipped: {exc}")
     updated_at = now_iso()
     conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
     return updated_at

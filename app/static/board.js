@@ -70,6 +70,7 @@
   const TARGET_IMAGE_BYTES = 2 * 1024 * 1024;
   const MAX_BOARD_BYTES = 15 * 1024 * 1024;
   const BOARD_SOFT_LIMIT_BYTES = MAX_BOARD_BYTES - 220 * 1024;
+  const LOAD_FROM_JSON_TIMEOUT_MS = 8000;
 
   let currentTool = "select";
   let currentShapeType = "rect";
@@ -1658,10 +1659,31 @@
     }, 60);
   }
 
+  function withTimeout(promise, timeoutMs, timeoutMessage = "timeout") {
+    const t = Number(timeoutMs || 0);
+    if (!Number.isFinite(t) || t <= 0) return promise;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(timeoutMessage)), t);
+      Promise.resolve(promise)
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+    });
+  }
+
   function applyCanvasState(canvasJson) {
     const selectedIds = captureActiveSelectionIds();
     isRemoteApplying = true;
-    Promise.resolve(fabricCanvas.loadFromJSON(canvasJson)).then(() => {
+    withTimeout(
+      Promise.resolve(fabricCanvas.loadFromJSON(canvasJson)),
+      LOAD_FROM_JSON_TIMEOUT_MS,
+      "load_from_json_timeout",
+    ).then(() => {
       isRemoteApplying = false;
       ensureCanvasTransparentBackground();
       syncLockStates();
@@ -1673,7 +1695,19 @@
       updateStylePanelVisibility();
       updateRotateButtonState();
       drawMiniMap();
-    }).catch(() => {
+    }).catch((err) => {
+      console.warn("Failed to apply full canvas state, falling back to safe empty state", err);
+      showBoardNotice("Не удалось загрузить часть содержимого доски");
+      try {
+        fabricCanvas.clear();
+        ensureCanvasTransparentBackground();
+        syncObjectInteractivity();
+        updateStylePanelVisibility();
+        updateRotateButtonState();
+        drawMiniMap();
+      } catch (_) {
+        // no-op
+      }
       isRemoteApplying = false;
     });
   }

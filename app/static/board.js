@@ -335,6 +335,12 @@
     return t === "i-text" || t === "text" || t === "textbox";
   }
 
+  function isTextModeSelectableObject(obj) {
+    if (!obj) return false;
+    const type = String(obj.type || "").toLowerCase();
+    return isTextObject(obj) || type === "image";
+  }
+
   function isNoMirrorObject(obj) {
     if (!obj) return false;
     return isTextObject(obj) || String(obj.type || "").toLowerCase() === "image";
@@ -958,9 +964,10 @@
 
     fabricCanvas.forEachObject((obj) => {
       const locked = isObjectLocked(obj);
+      const textSelectable = textMode && !locked && isTextModeSelectableObject(obj);
       const textEditable = textMode && isTextObject(obj);
-      obj.selectable = (selectMode && !locked) || textEditable;
-      obj.evented = locked ? selectMode : (selectMode || eraseMode || textEditable);
+      obj.selectable = (selectMode && !locked) || textSelectable;
+      obj.evented = locked ? (selectMode || textSelectable) : (selectMode || eraseMode || textSelectable || textEditable);
     });
 
     if (!selectMode && !textMode) {
@@ -2218,20 +2225,16 @@
     const p = fabricCanvas.getScenePoint(evt);
 
     if (currentTool === "text") {
-      if (target && isTextObject(target) && typeof target.enterEditing === "function") {
-        const targetId = String(target.obj_id || target.id || "");
+      if (target && isTextModeSelectableObject(target)) {
+        skipNextTextCreate = false;
+        textEditArmedObjId = "";
         if (fabricCanvas.getActiveObject() !== target) {
           fabricCanvas.setActiveObject(target);
         }
-        syncITextLayout(target);
-        const shouldEdit = !!targetId && textEditArmedObjId === targetId;
-        if (shouldEdit && !target.isEditing) {
-          target.enterEditing();
-          scheduleITextLayoutSync(target, 5, true);
-          textEditArmedObjId = "";
-        } else {
-          textEditArmedObjId = targetId;
-        }
+        applySelectionStyles();
+        updateStylePanelVisibility();
+        updateLockButtonsState();
+        fabricCanvas.requestRenderAll();
         return;
       }
 

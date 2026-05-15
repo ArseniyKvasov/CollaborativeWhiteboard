@@ -336,9 +336,7 @@
   }
 
   function isTextModeSelectableObject(obj) {
-    if (!obj) return false;
-    const type = String(obj.type || "").toLowerCase();
-    return isTextObject(obj) || type === "image";
+    return !!obj && isTextObject(obj);
   }
 
   function isNoMirrorObject(obj) {

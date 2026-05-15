@@ -73,7 +73,7 @@
   const LOAD_FROM_JSON_TIMEOUT_MS = 8000;
 
   let currentTool = "select";
-  let currentShapeType = "rect";
+  let currentShapeType = "arrow";
   let currentColor = paletteColors[0];
   let currentBackground = "grid";
   let canEdit = false;
@@ -340,26 +340,42 @@
     return isTextObject(obj) || String(obj.type || "").toLowerCase() === "image";
   }
 
+  function isUniformScaleObject(obj) {
+    return isNoMirrorObject(obj);
+  }
+
   function enforceNoMirrorObject(obj) {
     if (!obj || !isNoMirrorObject(obj) || typeof obj.set !== "function") return false;
     const nextScaleX = Math.max(0.001, Math.abs(Number(obj.scaleX || 1)));
     const nextScaleY = Math.max(0.001, Math.abs(Number(obj.scaleY || 1)));
+    const enforceUniformScale = isUniformScaleObject(obj);
+    const nextScale = enforceUniformScale ? Math.max(nextScaleX, nextScaleY) : 0;
     const mustDisableFlip = !!obj.flipX || !!obj.flipY;
     const mustLockFlipScale = obj.lockScalingFlip !== true;
+    const mustLockUniScale = enforceUniformScale && obj.lockUniScaling !== true;
     const changed =
       !Number.isFinite(Number(obj.scaleX)) || !Number.isFinite(Number(obj.scaleY))
       || nextScaleX !== Number(obj.scaleX || 1)
       || nextScaleY !== Number(obj.scaleY || 1)
+      || (enforceUniformScale && (nextScaleX !== nextScale || nextScaleY !== nextScale))
       || mustDisableFlip
-      || mustLockFlipScale;
+      || mustLockFlipScale
+      || mustLockUniScale;
     if (!changed) return false;
-    obj.set({
-      scaleX: nextScaleX,
-      scaleY: nextScaleY,
+    const nextProps = {
       flipX: false,
       flipY: false,
       lockScalingFlip: true,
-    });
+    };
+    if (enforceUniformScale) {
+      nextProps.scaleX = nextScale;
+      nextProps.scaleY = nextScale;
+      nextProps.lockUniScaling = true;
+    } else {
+      nextProps.scaleX = nextScaleX;
+      nextProps.scaleY = nextScaleY;
+    }
+    obj.set(nextProps);
     obj.setCoords();
     return true;
   }
@@ -975,9 +991,11 @@
         cornerStrokeColor: "#0d6efd",
         cornerSize: 10,
         touchCornerSize: 28,
+        lockUniScaling: false,
       });
       setCornerOnlyControls(active);
     } else {
+      const uniformScale = isUniformScaleObject(active);
       active.set({
         hasControls: true,
         hasBorders: true,
@@ -990,10 +1008,12 @@
         cornerSize: 10,
         touchCornerSize: 28,
         lockRotation: true,
+        lockUniScaling: uniformScale,
       });
       setCornerOnlyControls(active);
     }
 
+    enforceNoMirrorInTarget(active);
     fabricCanvas.requestRenderAll();
   }
 
@@ -1237,7 +1257,7 @@
 
   function serializeObject(obj) {
     ensureObjMeta(obj);
-    return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius", "shapeKind", "wb_locked"]);
+    return obj.toObject(["obj_id", "author_id", "author_name", "cornerRadius", "shapeKind", "wb_locked", "lockUniScaling"]);
   }
 
   function cloneJson(value) {
@@ -1954,6 +1974,10 @@
       img.set({
         left: worldX - img.getScaledWidth() / 2,
         top: worldY - img.getScaledHeight() / 2,
+        lockUniScaling: true,
+        lockScalingFlip: true,
+        flipX: false,
+        flipY: false,
       });
       ensureObjMeta(img);
       const serialized = serializeObject(img);
@@ -2227,6 +2251,7 @@
         fontFamily: "Montserrat, sans-serif",
         fontWeight: "500",
         lockScalingFlip: true,
+        lockUniScaling: true,
         flipX: false,
         flipY: false,
       });
@@ -3021,7 +3046,7 @@
   setupObjectStyles();
   syncCustomColorInputs(currentColor);
   buildPalette();
-  setShapeType("rect");
+  setShapeType("arrow");
   setBackground("grid");
   resizeCanvas(true);
   ensureCanvasTransparentBackground();

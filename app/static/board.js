@@ -243,6 +243,7 @@
   const fabricCanvas = new fabric.Canvas(canvasEl, {
     selection: true,
     preserveObjectStacking: true,
+    fireMiddleClick: true,
   });
   fabricCanvas.uniformScaling = false;
 

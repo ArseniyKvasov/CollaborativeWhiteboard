@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -11,10 +12,11 @@ from typing import Any, Optional
 from urllib.parse import parse_qs
 
 import jwt
+import redis.asyncio as aioredis
 import socketio
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -25,6 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", str(BASE_DIR / "boards.db"))
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 DEBUG_RAW = os.getenv("DEBUG", "false")
 DEBUG = str(DEBUG_RAW).strip().lower() in {"1", "true", "yes", "on"}
@@ -32,6 +35,20 @@ DEBUG_USER_ID = os.getenv("DEBUG_USER_ID", "debug-user")
 JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "45"))
 WS_ACCESS_TTL_SECONDS = int(os.getenv("WS_ACCESS_TTL_SECONDS", "300"))
 WS_REFRESH_TTL_SECONDS = int(os.getenv("WS_REFRESH_TTL_SECONDS", "28800"))
+RATE_LIMIT_HTTP_PER_MINUTE = int(os.getenv("RATE_LIMIT_HTTP_PER_MINUTE", "120"))
+RATE_LIMIT_SOCKET_PER_10S = int(os.getenv("RATE_LIMIT_SOCKET_PER_10S", "60"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("whiteboard")
+
+# Shared across every worker process so Socket.IO broadcast, presence and
+# undo/redo history all stay consistent once the app runs with more than one
+# uvicorn worker/instance (previously all three lived in per-process memory,
+# which only happened to work because the app ran as a single process).
+redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 app = FastAPI(title="Whiteboard Service", version="1.0.0")
 
@@ -42,6 +59,38 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_logging_and_rate_limit(request: Request, call_next):
+    start = time.monotonic()
+    client_ip = request.client.host if request.client else "unknown"
+
+    if request.url.path.startswith("/api/"):
+        window = int(time.time() // 60)
+        key = f"wb:ratelimit:http:{client_ip}:{window}"
+        try:
+            count = await redis_client.incr(key)
+            if count == 1:
+                await redis_client.expire(key, 60)
+        except Exception:
+            count = 0  # Redis unavailable: fail open rather than blocking all traffic.
+        if count > RATE_LIMIT_HTTP_PER_MINUTE:
+            logger.warning("rate_limited method=%s path=%s ip=%s", request.method, request.url.path, client_ip)
+            return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+
+    response = await call_next(request)
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "request method=%s path=%s status=%s duration_ms=%d ip=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        client_ip,
+    )
+    return response
+
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -302,7 +351,7 @@ class BoardTaskManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[BoardTaskManager] Worker error for {board_id}: {e}")
+                logger.exception("BoardTaskManager worker error for %s: %s", board_id, e)
                 await asyncio.sleep(0.1)
 
     async def run(self, board_id: str, fn, *args, **kwargs):
@@ -310,6 +359,18 @@ class BoardTaskManager:
         future = asyncio.get_running_loop().create_future()
         await queue.put((fn, args, kwargs, future))
         return await future
+
+    async def drain(self, timeout: float = 10.0) -> None:
+        """Wait for all in-flight writes to finish, so a deploy/restart doesn't
+        drop the last few edits a client just sent."""
+        queues = list(self._queues.values())
+        if not queues:
+            return
+        try:
+            await asyncio.wait_for(asyncio.gather(*(q.join() for q in queues)), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("BoardTaskManager.drain timed out with writes still pending")
+
 
 board_task_manager = BoardTaskManager()
 compaction_tasks: dict[str, asyncio.Task] = {}
@@ -322,11 +383,21 @@ def trigger_compaction_debounced(board_id: str):
     async def _debounced():
         try:
             await asyncio.sleep(5.0)
+            # With multiple workers/instances, more than one process can debounce
+            # a compaction for the same board at once. A short-lived Redis lock
+            # keeps only one of them actually doing the work.
+            lock_key = f"wb:compact-lock:{board_id}"
+            try:
+                acquired = await redis_client.set(lock_key, "1", nx=True, ex=30)
+            except Exception:
+                acquired = True  # Redis unavailable: fall back to old single-process behavior.
+            if not acquired:
+                return
             await board_task_manager.run(board_id, _compact_board_db, board_id)
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"[Compaction] Error compacting board {board_id}: {e}")
+            logger.exception("Error compacting board %s: %s", board_id, e)
         finally:
             compaction_tasks.pop(board_id, None)
 
@@ -352,10 +423,10 @@ def _compact_board_db(board_id: str):
         )
         conn.execute("DELETE FROM board_ops WHERE board_id = ? AND id <= ?", (board_id, max_id))
         conn.commit()
-        print(f"[Compaction] Board {board_id} compacted up to sequence {max_id}")
+        logger.info("Board %s compacted up to sequence %s", board_id, max_id)
     except Exception as exc:
         conn.rollback()
-        print(f"[Compaction] Failed to compact board {board_id}: {exc}")
+        logger.exception("Failed to compact board %s: %s", board_id, exc)
         raise exc
     finally:
         conn.close()
@@ -616,6 +687,14 @@ def _db_redo(board_id: str, action: Any, user: UserContext) -> tuple[list[dict[s
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    # Let in-flight board writes finish before the process exits, so a deploy
+    # or restart doesn't silently drop a client's last edit.
+    await board_task_manager.drain()
+    await redis_client.aclose()
 
 
 def parse_bearer(authorization: Optional[str]) -> Optional[str]:
@@ -1021,8 +1100,13 @@ def ensure_user_board_access(conn: sqlite3.Connection, board_id: str, user: User
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    redis_ok = True
+    try:
+        await redis_client.ping()
+    except Exception:
+        redis_ok = False
+    return {"status": "ok" if redis_ok else "degraded", "redis": redis_ok}
 
 
 @app.get("/board/{board_id}", response_class=HTMLResponse)
@@ -1531,31 +1615,77 @@ def _decorate_ops_for_wire(ops: list[dict[str, Any]], session: dict[str, Any], o
 
 
 class SocketBoardManager:
-    def __init__(self):
-        self.online: dict[str, dict[str, dict[str, str]]] = {}
-        self.history: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
+    """
+    Presence and undo/redo history, backed by Redis instead of process memory.
+    This is what makes both correct once more than one worker/instance is
+    running: previously both lived in a plain dict on `self`, so a user whose
+    reconnect landed on a different worker would see an empty/wrong undo stack
+    and stale online counts.
+    """
 
-    def add(self, board_id: str, sid: str, user_id: str, username: str, role: str, client_id: str) -> None:
-        self.online.setdefault(board_id, {})[sid] = {
-            "user_id": user_id,
-            "username": username,
-            "role": role,
-            "client_id": client_id,
-        }
+    def _presence_key(self, board_id: str) -> str:
+        return f"wb:presence:{board_id}"
 
-    def remove(self, board_id: str, sid: str) -> Optional[dict[str, str]]:
-        room = self.online.get(board_id, {})
-        meta = room.pop(sid, None)
-        if not room and board_id in self.online:
-            del self.online[board_id]
-        return meta
+    def _history_key(self, board_id: str) -> str:
+        return f"wb:history:{board_id}"
 
-    def online_count(self, board_id: str) -> int:
-        return len(self.online.get(board_id, {}))
+    async def add(self, board_id: str, sid: str, user_id: str, username: str, role: str, client_id: str) -> None:
+        info = {"user_id": user_id, "username": username, "role": role, "client_id": client_id}
+        try:
+            await redis_client.hset(self._presence_key(board_id), sid, json.dumps(info, ensure_ascii=False))
+        except Exception:
+            logger.exception("presence add failed for board %s", board_id)
 
-    def get_user_history(self, board_id: str, user_id: str) -> dict[str, list[dict[str, Any]]]:
-        board_hist = self.history.setdefault(board_id, {})
-        return board_hist.setdefault(user_id, {"undo": [], "redo": []})
+    async def remove(self, board_id: str, sid: str) -> Optional[dict[str, str]]:
+        key = self._presence_key(board_id)
+        try:
+            raw = await redis_client.hget(key, sid)
+            await redis_client.hdel(key, sid)
+        except Exception:
+            logger.exception("presence remove failed for board %s", board_id)
+            return None
+        return json.loads(raw) if raw else None
+
+    async def online_count(self, board_id: str) -> int:
+        try:
+            return int(await redis_client.hlen(self._presence_key(board_id)))
+        except Exception:
+            logger.exception("presence count failed for board %s", board_id)
+            return 0
+
+    async def get_online(self, board_id: str) -> dict[str, dict[str, str]]:
+        try:
+            raw = await redis_client.hgetall(self._presence_key(board_id))
+        except Exception:
+            logger.exception("presence list failed for board %s", board_id)
+            return {}
+        return {sid: json.loads(v) for sid, v in raw.items()}
+
+    async def get_user_history(self, board_id: str, user_id: str) -> dict[str, list[dict[str, Any]]]:
+        try:
+            raw = await redis_client.hget(self._history_key(board_id), user_id)
+        except Exception:
+            logger.exception("history read failed for board %s", board_id)
+            raw = None
+        if not raw:
+            return {"undo": [], "redo": []}
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {"undo": [], "redo": []}
+        return {"undo": data.get("undo") or [], "redo": data.get("redo") or []}
+
+    async def save_user_history(self, board_id: str, user_id: str, hist: dict[str, list[dict[str, Any]]]) -> None:
+        try:
+            await redis_client.hset(self._history_key(board_id), user_id, json.dumps(hist, ensure_ascii=False))
+        except Exception:
+            logger.exception("history save failed for board %s", board_id)
+
+    async def clear_history(self, board_id: str) -> None:
+        try:
+            await redis_client.delete(self._history_key(board_id))
+        except Exception:
+            logger.exception("history clear failed for board %s", board_id)
 
 
 board_manager = SocketBoardManager()
@@ -1565,7 +1695,21 @@ sio = socketio.AsyncServer(
     logger=False,
     engineio_logger=False,
     max_http_buffer_size=SOCKET_MAX_BUFFER_BYTES,
+    client_manager=socketio.AsyncRedisManager(REDIS_URL),
 )
+
+
+async def _check_socket_rate_limit(sid: str, event: str, limit: int = RATE_LIMIT_SOCKET_PER_10S) -> bool:
+    """Returns True if sid is within budget for `event`, False if it should be dropped."""
+    window = int(time.time() // 10)
+    key = f"wb:ratelimit:ws:{event}:{sid}:{window}"
+    try:
+        count = await redis_client.incr(key)
+        if count == 1:
+            await redis_client.expire(key, 10)
+    except Exception:
+        return True  # Redis unavailable: fail open.
+    return count <= limit
 
 
 async def _push_role_update(board_id: str, user_id: str, new_role: str) -> None:
@@ -1575,7 +1719,7 @@ async def _push_role_update(board_id: str, user_id: str, new_role: str) -> None:
     instead of only after the user reconnects (board_role was previously read
     once at connect() and never refreshed).
     """
-    room = board_manager.online.get(board_id, {})
+    room = await board_manager.get_online(board_id)
     target_sids = [sid for sid, info in room.items() if info.get("user_id") == user_id]
     for sid in target_sids:
         try:
@@ -1613,7 +1757,7 @@ def _read_board_canvas(conn: sqlite3.Connection, board_id: str) -> dict[str, Any
         return _apply_prepared_ops(canvas, ops, UserContext("system", "system", "system", {}))
     except Exception as exc:
         # Keep board available even if some persisted op chain is broken.
-        print(f"[board:{board_id}] failed to replay ops, using baseline canvas: {exc}")
+        logger.exception("Board %s failed to replay ops, using baseline canvas: %s", board_id, exc)
         return canvas
 
 
@@ -1655,7 +1799,7 @@ def _append_board_ops(conn: sqlite3.Connection, board_id: str, ops: list[dict[st
             conn.execute("DELETE FROM board_ops WHERE board_id = ?", (board_id,))
         except Exception as exc:
             # Do not break user operations if compaction fails.
-            print(f"[board:{board_id}] op compaction skipped: {exc}")
+            logger.exception("Board %s op compaction skipped: %s", board_id, exc)
     updated_at = now_iso()
     conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
     return updated_at
@@ -1752,7 +1896,7 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
     )
 
     await sio.enter_room(sid, board_id)
-    board_manager.add(board_id, sid, user.user_id, user.username, user.role, client_id)
+    await board_manager.add(board_id, sid, user.user_id, user.username, user.role, client_id)
 
     status = "init"
     missed_ops = []
@@ -1783,7 +1927,7 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
             "can_edit": (user.role == "moderator") or (
                 allow_students_draw and ROLE_RANK.get(board_role, 0) >= ROLE_RANK["editor"]
             ),
-            "online": board_manager.online_count(board_id),
+            "online": await board_manager.online_count(board_id),
         },
         to=sid,
     )
@@ -1799,7 +1943,7 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
         }
         await sio.emit("batch_update", payload, to=sid)
 
-    await sio.emit("presence", {"online": board_manager.online_count(board_id)}, room=board_id)
+    await sio.emit("presence", {"online": await board_manager.online_count(board_id)}, room=board_id)
 
 
 @sio.event
@@ -1809,15 +1953,19 @@ async def disconnect(sid: str):
         return
     board_id = session["board_id"]
     client_id = session["client_id"]
-    board_manager.remove(board_id, sid)
+    await board_manager.remove(board_id, sid)
     await sio.emit("cursor_remove", {"client_id": client_id}, room=board_id)
-    await sio.emit("presence", {"online": board_manager.online_count(board_id)}, room=board_id)
+    await sio.emit("presence", {"online": await board_manager.online_count(board_id)}, room=board_id)
 
 
 @sio.event
 async def cursor(sid: str, data: Any):
     session = await sio.get_session(sid)
     if not session or not isinstance(data, dict):
+        return
+    # Cursor moves are frequent by design (client throttles to ~20/s); give them
+    # a much higher budget than board-mutating events.
+    if not await _check_socket_rate_limit(sid, "cursor", limit=RATE_LIMIT_SOCKET_PER_10S * 5):
         return
 
     x = data.get("x")
@@ -1844,6 +1992,9 @@ async def update(sid: str, data: Any):
     session = await sio.get_session(sid)
     if not session or not _can_edit(session):
         await sio.emit("error_msg", {"message": "Read-only access"}, to=sid)
+        return
+    if not await _check_socket_rate_limit(sid, "update"):
+        await sio.emit("error_msg", {"message": "Too many updates, slow down"}, to=sid)
         return
     if not isinstance(data, dict) or not isinstance(data.get("canvas_json"), dict):
         await sio.emit("error_msg", {"message": "canvas_json must be object"}, to=sid)
@@ -1880,13 +2031,15 @@ async def update(sid: str, data: Any):
     if should_compact:
         trigger_compaction_debounced(board_id)
 
-    user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
+    actor_key = _history_actor_key(session)
+    user_hist = await board_manager.get_user_history(board_id, actor_key)
     if action:
         _extract_added_objects(action, new_canvas)
         user_hist["undo"].append(action)
         if len(user_hist["undo"]) > 100:
             user_hist["undo"] = user_hist["undo"][-100:]
         user_hist["redo"].clear()
+        await board_manager.save_user_history(board_id, actor_key, user_hist)
 
     if applied_ops:
         wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
@@ -1936,6 +2089,9 @@ async def _process_ops_event(sid: str, data: Any):
     if not session or not _can_edit(session):
         await sio.emit("error_msg", {"message": "Read-only access"}, to=sid)
         return
+    if not await _check_socket_rate_limit(sid, "ops"):
+        await sio.emit("error_msg", {"message": "Too many updates, slow down"}, to=sid)
+        return
     if not isinstance(data, dict) or not isinstance(data.get("ops"), list):
         await sio.emit("error_msg", {"message": "ops must be array"}, to=sid)
         return
@@ -1970,8 +2126,9 @@ async def _process_ops_event(sid: str, data: Any):
     if should_compact:
         trigger_compaction_debounced(board_id)
 
-    user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
-    
+    actor_key = _history_actor_key(session)
+    user_hist = await board_manager.get_user_history(board_id, actor_key)
+
     if not applied_ops:
         await sio.emit(
             "history_state",
@@ -1984,6 +2141,7 @@ async def _process_ops_event(sid: str, data: Any):
     if len(user_hist["undo"]) > 200:
         user_hist["undo"] = user_hist["undo"][-200:]
     user_hist["redo"].clear()
+    await board_manager.save_user_history(board_id, actor_key, user_hist)
 
     wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
     payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
@@ -2011,7 +2169,7 @@ async def clear(sid: str):
         await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
         return
         
-    board_manager.history[board_id] = {}
+    await board_manager.clear_history(board_id)
 
     await sio.emit(
         "clear",
@@ -2030,7 +2188,7 @@ async def history_state_request(sid: str):
     session = await sio.get_session(sid)
     if not session:
         return
-    hist = board_manager.get_user_history(session["board_id"], _history_actor_key(session))
+    hist = await board_manager.get_user_history(session["board_id"], _history_actor_key(session))
     await sio.emit(
         "history_state",
         {"undo_available": bool(hist["undo"]), "redo_available": bool(hist["redo"])},
@@ -2045,7 +2203,8 @@ async def undo(sid: str):
         return
 
     board_id = session["board_id"]
-    user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
+    actor_key = _history_actor_key(session)
+    user_hist = await board_manager.get_user_history(board_id, actor_key)
     if not user_hist["undo"]:
         await sio.emit("history_state", {"undo_available": False, "redo_available": bool(user_hist["redo"])}, to=sid)
         return
@@ -2059,16 +2218,19 @@ async def undo(sid: str):
     except ValueError:
         await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
         user_hist["undo"].append(action)
+        await board_manager.save_user_history(board_id, actor_key, user_hist)
         return
     except Exception as exc:
         await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
         user_hist["undo"].append(action)
+        await board_manager.save_user_history(board_id, actor_key, user_hist)
         return
 
     if should_compact:
         trigger_compaction_debounced(board_id)
 
     user_hist["redo"].append(action)
+    await board_manager.save_user_history(board_id, actor_key, user_hist)
     if applied_ops:
         wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
@@ -2099,7 +2261,8 @@ async def redo(sid: str):
         return
 
     board_id = session["board_id"]
-    user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
+    actor_key = _history_actor_key(session)
+    user_hist = await board_manager.get_user_history(board_id, actor_key)
     if not user_hist["redo"]:
         await sio.emit("history_state", {"undo_available": bool(user_hist["undo"]), "redo_available": False}, to=sid)
         return
@@ -2113,16 +2276,19 @@ async def redo(sid: str):
     except ValueError:
         await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
         user_hist["redo"].append(action)
+        await board_manager.save_user_history(board_id, actor_key, user_hist)
         return
     except Exception as exc:
         await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
         user_hist["redo"].append(action)
+        await board_manager.save_user_history(board_id, actor_key, user_hist)
         return
 
     if should_compact:
         trigger_compaction_debounced(board_id)
 
     user_hist["undo"].append(action)
+    await board_manager.save_user_history(board_id, actor_key, user_hist)
     if applied_ops:
         wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}

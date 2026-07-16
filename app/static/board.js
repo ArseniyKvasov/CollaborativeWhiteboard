@@ -1780,7 +1780,8 @@
       let enlivened = null;
       try {
         enlivened = await enlivenOne(objectJson);
-      } catch (_) {
+      } catch (err) {
+        console.error("[board] failed to enliven remote object", objectJson && objectJson.type, err);
         enlivened = null;
       }
       if (!enlivened) return;
@@ -1811,8 +1812,10 @@
         for (const op of list) {
           try {
             await applyRemoteOp(op);
-          } catch (_) {
-            // skip bad op and continue applying the rest
+          } catch (err) {
+            // Skip bad op and continue applying the rest, but surface it -
+            // silently swallowing this made real sync bugs invisible.
+            console.error("[board] failed to apply remote op", op, err);
           }
         }
       } finally {

@@ -17,6 +17,18 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: whiteboard-redis-prod
+    volumes:
+      - redis_prod_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   whiteboard:
     build:
       context: .
@@ -24,14 +36,20 @@ services:
     container_name: whiteboard-prod
     env_file:
       - .env.production
+    environment:
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "${HOST_PORT:-8000}:8000"
     volumes:
       - whiteboard_data:/data
     restart: unless-stopped
-    command: uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --proxy-headers
+    # Now safe to run multiple workers: Socket.IO fan-out, presence and undo/redo
+    # history are all backed by Redis instead of per-process memory.
+    command: uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --proxy-headers --workers ${UVICORN_WORKERS:-2}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
@@ -43,4 +61,5 @@ services:
 volumes:
   whiteboard_data:
   postgres_prod_data:
+  redis_prod_data:
 

@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import os
@@ -14,11 +15,12 @@ from urllib.parse import parse_qs
 import jwt
 import redis.asyncio as aioredis
 import socketio
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
@@ -95,13 +97,23 @@ async def request_logging_and_rate_limit(request: Request, call_next):
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
 
 ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
 PENDING_OWNER_ID = "__pending_moderator__"
-MAX_BOARD_BYTES = 15 * 1024 * 1024
+MAX_BOARD_BYTES = 30 * 1024 * 1024
 DEFAULT_SURFACE_ID = "main"
 SOCKET_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 OPS_COMPACT_COUNT_THRESHOLD = 700
+# Raw upload cap before server-side processing. The client already downsizes
+# images to ~2MB/2400px before sending, this is just generous headroom for
+# clients that skip that step (or a future Miro import feeding raw images in).
+MAX_UPLOAD_IMAGE_BYTES = 10 * 1024 * 1024
+UPLOAD_IMAGE_MAX_SIDE = 2400
+UPLOAD_IMAGE_WEBP_QUALITY = 82
 OPS_COMPACT_BYTES_THRESHOLD = 4 * 1024 * 1024
 
 
@@ -841,7 +853,7 @@ def _json_size_bytes(value: Any) -> int:
 def _ensure_board_size_limit(value: Any) -> None:
     size = _json_size_bytes(value)
     if size > MAX_BOARD_BYTES:
-        raise ValueError(f"Board size exceeds 15 MB ({size} bytes)")
+        raise ValueError(f"Board size exceeds {MAX_BOARD_BYTES // (1024 * 1024)} MB ({size} bytes)")
 
 
 def _normalize_runtime_canvas(canvas_json: Any, user: Optional[UserContext] = None) -> dict[str, Any]:
@@ -1186,6 +1198,69 @@ def save_board_state(board_id: str, body: SaveBoardRequest, user: UserContext = 
         return {"ok": True, "board_id": board_id, "updated_at": updated_at}
     finally:
         conn.close()
+
+
+def _process_and_store_image(board_id: str, raw: bytes) -> tuple[str, int, int]:
+    """
+    Downsize/re-encode an uploaded image to WEBP and save it under UPLOAD_DIR.
+    Runs in a worker thread (see upload_image) - Pillow is sync/CPU-bound, and
+    an already-client-compressed image (~2MB) processes in well under 100ms,
+    so doing this synchronously in the request (off the event loop) is simpler
+    than a background job/queue and keeps the "image appears" UX immediate.
+    A background queue only starts to pay for itself for bulk operations like
+    importing many images at once (e.g. a future Miro import), not single
+    interactive uploads.
+    """
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except Exception as exc:
+        raise ValueError("Invalid or unsupported image file") from exc
+
+    img = ImageOps.exif_transpose(img) or img
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+
+    width, height = img.size
+    longest = max(width, height)
+    if longest > UPLOAD_IMAGE_MAX_SIDE:
+        scale = UPLOAD_IMAGE_MAX_SIDE / longest
+        width = max(1, round(width * scale))
+        height = max(1, round(height * scale))
+        img = img.resize((width, height), Image.LANCZOS)
+
+    board_dir = UPLOAD_DIR / board_id
+    board_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}.webp"
+    img.save(board_dir / filename, format="WEBP", quality=UPLOAD_IMAGE_WEBP_QUALITY, method=6)
+
+    return f"/uploads/{board_id}/{filename}", width, height
+
+
+@app.post("/api/board/{board_id}/upload-image")
+async def upload_image(
+    board_id: str, file: UploadFile = File(...), user: UserContext = Depends(authenticate_request)
+):
+    conn = get_db()
+    try:
+        ensure_user_board_access(conn, board_id, user)
+        ensure_board_exists(conn, board_id)
+        require_role(conn, board_id, user.user_id, "editor")
+    finally:
+        conn.close()
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(raw) > MAX_UPLOAD_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image exceeds upload size limit")
+
+    try:
+        url, width, height = await asyncio.to_thread(_process_and_store_image, board_id, raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"url": url, "width": width, "height": height}
 
 
 @app.delete("/api/board/{board_id}")
@@ -2014,7 +2089,7 @@ async def update(sid: str, data: Any):
             board_id, _db_update, board_id, new_canvas, user
         )
     except ValueError:
-        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        await sio.emit("error_msg", {"message": f"Board size exceeds {MAX_BOARD_BYTES // (1024 * 1024)} MB"}, to=sid)
         canvas_json, max_op_id = await board_task_manager.run(board_id, _db_read_canvas_and_max_id, board_id)
         await sio.emit("update", {
             "board_id": board_id,
@@ -2109,7 +2184,7 @@ async def _process_ops_event(sid: str, data: Any):
             board_id, _db_apply_ops, board_id, data["ops"], user
         )
     except ValueError:
-        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        await sio.emit("error_msg", {"message": f"Board size exceeds {MAX_BOARD_BYTES // (1024 * 1024)} MB"}, to=sid)
         canvas_json, max_op_id = await board_task_manager.run(board_id, _db_read_canvas_and_max_id, board_id)
         await sio.emit("update", {
             "board_id": board_id,
@@ -2216,7 +2291,7 @@ async def undo(sid: str):
             board_id, _db_undo, board_id, action, user
         )
     except ValueError:
-        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        await sio.emit("error_msg", {"message": f"Board size exceeds {MAX_BOARD_BYTES // (1024 * 1024)} MB"}, to=sid)
         user_hist["undo"].append(action)
         await board_manager.save_user_history(board_id, actor_key, user_hist)
         return
@@ -2274,7 +2349,7 @@ async def redo(sid: str):
             board_id, _db_redo, board_id, action, user
         )
     except ValueError:
-        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        await sio.emit("error_msg", {"message": f"Board size exceeds {MAX_BOARD_BYTES // (1024 * 1024)} MB"}, to=sid)
         user_hist["redo"].append(action)
         await board_manager.save_user_history(board_id, actor_key, user_hist)
         return

@@ -68,7 +68,7 @@
   const UNLOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/unlock-outline.svg\')"></span>';
   const MAX_IMAGE_IMPORT_SIDE = 2400;
   const TARGET_IMAGE_BYTES = 2 * 1024 * 1024;
-  const MAX_BOARD_BYTES = 15 * 1024 * 1024;
+  const MAX_BOARD_BYTES = 30 * 1024 * 1024;
   const BOARD_SOFT_LIMIT_BYTES = MAX_BOARD_BYTES - 220 * 1024;
   const LOAD_FROM_JSON_TIMEOUT_MS = 8000;
 
@@ -1988,6 +1988,33 @@
     return worldFromScreen(clientX - rect.left, clientY - rect.top);
   }
 
+  async function dataUrlToBlob(dataUrl) {
+    const res = await fetch(dataUrl);
+    return res.blob();
+  }
+
+  async function uploadImageToServer(blobOrFile, filename) {
+    const form = new FormData();
+    form.append("file", blobOrFile, filename || "image");
+    const headers = {};
+    if (pageToken) headers["Authorization"] = `Bearer ${pageToken}`;
+    const res = await fetch(`/api/board/${encodeURIComponent(boardId)}/upload-image`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = (await res.json()).detail || "";
+      } catch (_) {
+        // ignore, fall back to generic message below
+      }
+      throw new Error(detail || "image_upload_failed");
+    }
+    return res.json();
+  }
+
   function addImageAtWorldPoint(dataUrl, worldX, worldY) {
     return fabric.Image.fromURL(dataUrl, { crossOrigin: "anonymous" }).then((img) => {
       const maxW = 640;
@@ -2019,14 +2046,18 @@
 
   async function addImageFileAtWorldPoint(file, worldX, worldY) {
     if (!isImageFile(file)) throw new Error("unsupported_file_type");
+    // Pre-shrink client-side first: cuts upload time/bandwidth and gives the
+    // backend an already-small image to re-encode (see _process_and_store_image
+    // for why that's processed synchronously rather than via a background job).
     let dataUrl = "";
     try {
       dataUrl = await optimizeImageFile(file);
     } catch (_) {
-      dataUrl = await readFileAsDataUrl(file);
+      dataUrl = "";
     }
-    if (!dataUrl) return;
-    await addImageAtWorldPoint(dataUrl, worldX, worldY);
+    const uploadBlob = dataUrl ? await dataUrlToBlob(dataUrl) : file;
+    const uploaded = await uploadImageToServer(uploadBlob, file.name);
+    await addImageAtWorldPoint(uploaded.url, worldX, worldY);
   }
 
   function worldCenterOfViewport() {

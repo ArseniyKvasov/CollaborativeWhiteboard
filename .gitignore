@@ -11,6 +11,7 @@ __pycache__/
 
 app/boards.db
 /data/
+app/uploads/
 
 node_modules/
 dist/

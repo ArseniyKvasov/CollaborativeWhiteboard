@@ -6,4 +6,5 @@ pydantic==2.10.6
 python-socketio==5.12.1
 psycopg2-binary==2.9.10
 redis==5.2.1
+Pillow==11.0.0
 

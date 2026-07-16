@@ -38,6 +38,11 @@ services:
       - .env.production
     environment:
       REDIS_URL: redis://redis:6379/0
+      # Uploaded images live on this container's local disk under the existing
+      # whiteboard_data volume. Fine for --workers within one container/host;
+      # scaling to multiple hosts would need this on shared/object storage
+      # (S3/MinIO) instead - not needed yet at this deployment's scale.
+      UPLOAD_DIR: /data/uploads
     ports:
       - "${HOST_PORT:-8000}:8000"
     volumes:

@@ -78,6 +78,7 @@
   let currentBackground = "grid";
   let canEdit = false;
   let boardRoleCanEdit = false;
+  let allowStudentsDraw = true;
   let debugForceEdit = false;
   let canClear = false;
   let myJwtRole = "";
@@ -96,6 +97,7 @@
   let cursorAnimFrame = 0;
   let pendingTextSyncTimer = null;
   let localOpSeq = 0;
+  let lastSeenSeqId = 0;
   let boardNoticeTimer = null;
   let copiedSelectionPayload = [];
   const ACTIVE_SURFACE_ID = "main";
@@ -244,6 +246,7 @@
     selection: true,
     preserveObjectStacking: true,
     fireMiddleClick: true,
+    targetFindTolerance: 10,
   });
   fabricCanvas.uniformScaling = false;
 
@@ -265,6 +268,7 @@
       borderOpacityWhenMoving: 0.95,
       lockRotation: true,
       lockUniScaling: false,
+      padding: 8,
     });
   }
 
@@ -1365,7 +1369,16 @@
   }
 
   function enqueueOps(ops) {
-    if (!canEdit || isRemoteApplying || suppressBroadcast) return;
+    // Note: deliberately does NOT gate on isRemoteApplying. That flag is only
+    // true while a remote batch is being enlivened/applied (an async, awaited
+    // process), and during that window the browser still delivers the local
+    // user's own input events (drawing, typing, dragging). Gating here used to
+    // silently drop those genuine local edits whenever they raced with someone
+    // else's incoming update - the more concurrent editors, the more often it
+    // happened. Echoing back a remote-applied object is prevented separately,
+    // at the object:added/object:removed handlers below, which never call
+    // into enqueueOps/emitUpdateOpImmediate in the first place.
+    if (!canEdit || suppressBroadcast) return;
     const normalized = (Array.isArray(ops) ? ops : [ops]).filter((op) => op && typeof op === "object");
     if (!normalized.length) return;
     pendingOps.push(...normalized);
@@ -1390,7 +1403,7 @@
   }
 
   function emitUpdateOpImmediate(obj, absolute = false) {
-    if (!canEdit || isRemoteApplying || suppressBroadcast) return;
+    if (!canEdit || suppressBroadcast) return;
     if (!isSyncableObject(obj) || obj._isDraft) return;
     socket.emit("batch_update", {
       ops: [buildAction("update", { object: absolute ? serializeAbsoluteObject(obj) : serializeObject(obj) })],
@@ -2910,6 +2923,20 @@
     updateLockButtonsState();
   });
 
+  function updateLastSeenSeq(ops) {
+    if (!Array.isArray(ops)) return;
+    let maxSeq = lastSeenSeqId;
+    for (const op of ops) {
+      if (op && typeof op.seq === "number" && op.seq > maxSeq) {
+        maxSeq = op.seq;
+      }
+    }
+    if (maxSeq > lastSeenSeqId) {
+      lastSeenSeqId = maxSeq;
+      socket.auth.last_seen_seq = lastSeenSeqId;
+    }
+  }
+
   socket.on("connect", () => {
     isSocketConnected = true;
   });
@@ -2920,11 +2947,14 @@
     hadConnectionDrop = true;
     canEdit = false;
     canClear = false;
+    // Keep any not-yet-sent ops (queued in the 35ms batch window) instead of
+    // discarding them - they never reached the server, so without this the
+    // user's last edit(s) right before a drop would simply vanish. They are
+    // flushed once the socket reconnects and resyncs, see socket.on("init").
     if (pendingOpsTimer) {
       clearTimeout(pendingOpsTimer);
       pendingOpsTimer = null;
     }
-    pendingOps = [];
     applyEditPermissions();
     showConnectionNotice("Связь потеряна. Пытаемся переподключиться…", 0);
     for (const clientId of remoteCursors.keys()) removeRemoteCursor(clientId);
@@ -2958,6 +2988,7 @@
     myJwtRole = msg.jwt_role || myJwtRole;
     debugForceEdit = !!msg.debug_force_edit;
     boardRoleCanEdit = msg.role === "owner" || msg.role === "editor";
+    allowStudentsDraw = !!msg.allow_students_draw;
     canEdit = debugForceEdit
       ? true
       : (typeof msg.can_edit === "boolean" ? msg.can_edit : boardRoleCanEdit);
@@ -2972,8 +3003,29 @@
       hadConnectionDrop = false;
     }
 
-    applyCanvasState(msg.canvas_json || { version: "6.0.0", objects: [] });
+    if (msg.last_seq_id) {
+      lastSeenSeqId = msg.last_seq_id;
+      socket.auth.last_seen_seq = lastSeenSeqId;
+    }
+
+    if (msg.status === "sync") {
+      // Keep existing canvas state
+    } else {
+      applyCanvasState(msg.canvas_json || { version: "6.0.0", objects: [] });
+    }
     socket.emit("history_state_request");
+
+    // Resend any ops that were queued but never made it out before a
+    // disconnect. add/update/remove ops are idempotent upserts keyed by
+    // obj_id, so replaying them here (even after a full canvas reload) is
+    // safe and restores edits that would otherwise have been lost.
+    if (pendingOps.length && canEdit) {
+      const batch = pendingOps;
+      pendingOps = [];
+      socket.emit("batch_update", { ops: batch });
+    } else {
+      pendingOps = [];
+    }
   });
 
   socket.on("board_policy", (msg) => {
@@ -2983,24 +3035,51 @@
       applyEditPermissions();
       return;
     }
-    const allowStudentsDraw = !!(msg && msg.allow_students_draw);
+    allowStudentsDraw = !!(msg && msg.allow_students_draw);
+    canEdit = (myJwtRole === "moderator") || (allowStudentsDraw && boardRoleCanEdit);
+    applyEditPermissions();
+  });
+
+  // Fires when an owner grants/revokes this user's board role while they're
+  // already connected, so access changes apply immediately instead of only
+  // after a reconnect/refresh.
+  socket.on("role_update", (msg) => {
+    if (!isSocketConnected || !isBoardInitialized || debugForceEdit) return;
+    boardRoleCanEdit = msg && (msg.role === "owner" || msg.role === "editor");
     canEdit = (myJwtRole === "moderator") || (allowStudentsDraw && boardRoleCanEdit);
     applyEditPermissions();
   });
 
   socket.on("ops", (msg) => {
-    if (msg && Array.isArray(msg.ops)) applyRemoteOps(msg.ops);
+    if (msg && Array.isArray(msg.ops)) {
+      applyRemoteOps(msg.ops);
+      updateLastSeenSeq(msg.ops);
+    }
   });
   socket.on("batch_update", (msg) => {
-    if (msg && Array.isArray(msg.ops)) applyRemoteOps(msg.ops);
+    if (msg && Array.isArray(msg.ops)) {
+      applyRemoteOps(msg.ops);
+      updateLastSeenSeq(msg.ops);
+    }
   });
 
   socket.on("update", (msg) => {
     if (msg.canvas_json) applyCanvasState(msg.canvas_json);
+    if (msg.last_seq_id) {
+      lastSeenSeqId = msg.last_seq_id;
+      socket.auth.last_seen_seq = lastSeenSeqId;
+    }
   });
 
   socket.on("clear", (msg) => {
     applyCanvasState(msg.canvas_json || { version: "6.0.0", objects: [] });
+    if (msg.last_seq_id) {
+      lastSeenSeqId = msg.last_seq_id;
+      socket.auth.last_seen_seq = lastSeenSeqId;
+    } else {
+      lastSeenSeqId = 0;
+      socket.auth.last_seen_seq = 0;
+    }
   });
 
   socket.on("cursor", (msg) => {

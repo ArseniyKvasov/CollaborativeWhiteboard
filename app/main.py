@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sqlite3
@@ -85,11 +86,83 @@ class WsTokenRefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=1)
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DATABASE_URL)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
+
+IS_POSTGRES = DATABASE_URL.startswith(("postgresql://", "postgres://"))
+
+if IS_POSTGRES and psycopg2 is None:
+    print("[DB] Warning: DATABASE_URL points to PostgreSQL, but psycopg2-binary is not installed!")
+
+
+class DbConnectionWrapper:
+    def __init__(self, conn, is_postgres: bool):
+        self._conn = conn
+        self._is_postgres = is_postgres
+
+    def execute(self, sql: str, params: tuple = ()):
+        if self._is_postgres:
+            sql = sql.replace("?", "%s")
+            if "INSERT OR IGNORE" in sql:
+                sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+                if "board_members" in sql:
+                    sql = sql + " ON CONFLICT (board_id, user_id) DO NOTHING"
+                elif "boards" in sql:
+                    sql = sql + " ON CONFLICT (board_id) DO NOTHING"
+            if "AUTOINCREMENT" in sql:
+                sql = sql.replace("AUTOINCREMENT", "")
+                sql = sql.replace("INTEGER PRIMARY KEY", "SERIAL PRIMARY KEY")
+                sql = sql.replace("integer primary key", "serial primary key")
+            if sql.strip().upper() == "BEGIN IMMEDIATE":
+                class DummyCursor:
+                    def fetchone(self): return None
+                    def fetchall(self): return []
+                return DummyCursor()
+
+            is_insert_ops = "INSERT INTO board_ops" in sql
+            if is_insert_ops:
+                sql = sql + " RETURNING id"
+
+            cur = self._conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute(sql, params)
+            if is_insert_ops:
+                row = cur.fetchone()
+                cur.lastrowid = row["id"] if row else None
+            return cur
+        else:
+            return self._conn.execute(sql, params)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def get_db():
+    if IS_POSTGRES:
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        conn = psycopg2.connect(url)
+        return DbConnectionWrapper(conn, True)
+    else:
+        conn = sqlite3.connect(DATABASE_URL, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        return DbConnectionWrapper(conn, False)
 
 
 def now_iso() -> str:
@@ -99,46 +172,443 @@ def now_iso() -> str:
 def init_db() -> None:
     conn = get_db()
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS boards (
-                board_id TEXT PRIMARY KEY,
-                canvas_json TEXT NOT NULL,
-                owner_id TEXT NOT NULL,
-                allow_students_draw INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+        if IS_POSTGRES:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS boards (
+                    board_id TEXT PRIMARY KEY,
+                    canvas_json TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    allow_students_draw INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_compacted_seq_id INTEGER NOT NULL DEFAULT 0
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS board_members (
-                board_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer')),
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (board_id, user_id),
-                FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS board_members (
+                    board_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer')),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (board_id, user_id),
+                    FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS board_ops (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                board_id TEXT NOT NULL,
-                op_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS board_ops (
+                    id SERIAL PRIMARY KEY,
+                    board_id TEXT NOT NULL,
+                    op_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+                )
+                """
             )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_board_ops_board_id_id ON board_ops(board_id, id)")
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(boards)").fetchall()}
-        if "allow_students_draw" not in cols:
-            conn.execute("ALTER TABLE boards ADD COLUMN allow_students_draw INTEGER NOT NULL DEFAULT 1")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_board_ops_board_id_id ON board_ops(board_id, id)")
+            rows = conn.execute("SELECT column_name AS name FROM information_schema.columns WHERE table_name = 'boards'").fetchall()
+            cols = {r["name"] for r in rows}
+            if "allow_students_draw" not in cols:
+                conn.execute("ALTER TABLE boards ADD COLUMN allow_students_draw INTEGER NOT NULL DEFAULT 1")
+            if "last_compacted_seq_id" not in cols:
+                conn.execute("ALTER TABLE boards ADD COLUMN last_compacted_seq_id INTEGER NOT NULL DEFAULT 0")
+        else:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS boards (
+                    board_id TEXT PRIMARY KEY,
+                    canvas_json TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    allow_students_draw INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_compacted_seq_id INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS board_members (
+                    board_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer')),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (board_id, user_id),
+                    FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS board_ops (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    board_id TEXT NOT NULL,
+                    op_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (board_id) REFERENCES boards(board_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_board_ops_board_id_id ON board_ops(board_id, id)")
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(boards)").fetchall()}
+            if "allow_students_draw" not in cols:
+                conn.execute("ALTER TABLE boards ADD COLUMN allow_students_draw INTEGER NOT NULL DEFAULT 1")
+            if "last_compacted_seq_id" not in cols:
+                conn.execute("ALTER TABLE boards ADD COLUMN last_compacted_seq_id INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+    finally:
+        conn.close()
+
+
+# Asynchronous write-queue manager to serialize DB writes and run them in thread executor.
+class BoardTaskManager:
+    def __init__(self):
+        self._queues: dict[str, asyncio.Queue] = {}
+        self._workers: dict[str, asyncio.Task] = {}
+
+    def _get_queue(self, board_id: str) -> asyncio.Queue:
+        if board_id not in self._queues:
+            self._queues[board_id] = asyncio.Queue()
+            self._workers[board_id] = asyncio.create_task(self._worker(board_id))
+        return self._queues[board_id]
+
+    async def _worker(self, board_id: str):
+        queue = self._queues[board_id]
+        while True:
+            try:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=600.0)
+                except asyncio.TimeoutError:
+                    if board_id in self._queues and self._queues[board_id].empty():
+                        self._queues.pop(board_id, None)
+                        self._workers.pop(board_id, None)
+                        break
+                    continue
+
+                fn, args, kwargs, future = item
+                try:
+                    res = await asyncio.to_thread(fn, *args, **kwargs)
+                    if not future.cancelled():
+                        future.set_result(res)
+                except Exception as exc:
+                    if not future.cancelled():
+                        future.set_exception(exc)
+                finally:
+                    queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[BoardTaskManager] Worker error for {board_id}: {e}")
+                await asyncio.sleep(0.1)
+
+    async def run(self, board_id: str, fn, *args, **kwargs):
+        queue = self._get_queue(board_id)
+        future = asyncio.get_running_loop().create_future()
+        await queue.put((fn, args, kwargs, future))
+        return await future
+
+board_task_manager = BoardTaskManager()
+compaction_tasks: dict[str, asyncio.Task] = {}
+
+
+def trigger_compaction_debounced(board_id: str):
+    if board_id in compaction_tasks:
+        compaction_tasks[board_id].cancel()
+
+    async def _debounced():
+        try:
+            await asyncio.sleep(5.0)
+            await board_task_manager.run(board_id, _compact_board_db, board_id)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[Compaction] Error compacting board {board_id}: {e}")
+        finally:
+            compaction_tasks.pop(board_id, None)
+
+    task = asyncio.create_task(_debounced())
+    compaction_tasks[board_id] = task
+
+
+def _compact_board_db(board_id: str):
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        max_op_row = conn.execute("SELECT MAX(id) AS max_id FROM board_ops WHERE board_id = ?", (board_id,)).fetchone()
+        max_id = max_op_row["max_id"] if max_op_row and max_op_row["max_id"] is not None else None
+        if max_id is None:
+            conn.commit()
+            return
+
+        compacted_canvas = _read_board_canvas(conn, board_id)
+        _ensure_board_size_limit(compacted_canvas)
+        conn.execute(
+            "UPDATE boards SET canvas_json = ?, last_compacted_seq_id = ? WHERE board_id = ?",
+            (json.dumps(compacted_canvas, ensure_ascii=False), max_id, board_id),
+        )
+        conn.execute("DELETE FROM board_ops WHERE board_id = ? AND id <= ?", (board_id, max_id))
+        conn.commit()
+        print(f"[Compaction] Board {board_id} compacted up to sequence {max_id}")
+    except Exception as exc:
+        conn.rollback()
+        print(f"[Compaction] Failed to compact board {board_id}: {exc}")
+        raise exc
+    finally:
+        conn.close()
+
+
+def _db_read_canvas_only(board_id: str) -> dict[str, Any]:
+    conn = get_db()
+    try:
+        return _read_board_canvas(conn, board_id)
+    finally:
+        conn.close()
+
+
+def _db_read_canvas_and_max_id(board_id: str) -> tuple[dict[str, Any], int]:
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT last_compacted_seq_id FROM boards WHERE board_id = ?", (board_id,)).fetchone()
+        last_compacted = row["last_compacted_seq_id"] if row else 0
+        max_op_row = conn.execute("SELECT MAX(id) AS max_id FROM board_ops WHERE board_id = ?", (board_id,)).fetchone()
+        max_op_id = max_op_row["max_id"] if max_op_row and max_op_row["max_id"] is not None else last_compacted
+        canvas = _read_board_canvas(conn, board_id)
+        return canvas, max_op_id
+    finally:
+        conn.close()
+
+
+
+def _load_connect_data(board_id: str, user: UserContext) -> tuple[str, bool, dict[str, Any], int, int]:
+    conn = get_db()
+    try:
+        ensure_user_board_access(conn, board_id, user)
+        ensure_board_exists(conn, board_id)
+        board_role = require_role(conn, board_id, user.user_id, "viewer")
+        row = conn.execute("SELECT canvas_json, last_compacted_seq_id FROM boards WHERE board_id = ?", (board_id,)).fetchone()
+        last_compacted_seq_id = row["last_compacted_seq_id"] if row else 0
+        max_op_row = conn.execute("SELECT MAX(id) AS max_id FROM board_ops WHERE board_id = ?", (board_id,)).fetchone()
+        max_op_id = max_op_row["max_id"] if max_op_row and max_op_row["max_id"] is not None else last_compacted_seq_id
+        canvas_json = _read_board_canvas(conn, board_id)
+        allow_students_draw = board_allows_students_draw(conn, board_id)
+        return board_role, allow_students_draw, canvas_json, last_compacted_seq_id, max_op_id
+    finally:
+        conn.close()
+
+
+def _get_missed_ops(board_id: str, last_seen_seq: int) -> list[dict[str, Any]]:
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, op_json FROM board_ops WHERE board_id = ? AND id > ? ORDER BY id ASC",
+            (board_id, last_seen_seq)
+        ).fetchall()
+        ops = []
+        for r in rows:
+            try:
+                op = json.loads(r["op_json"])
+                if isinstance(op, dict):
+                    op["seq"] = r["id"]
+                    ops.append(op)
+            except Exception:
+                pass
+        return ops
+    finally:
+        conn.close()
+
+
+def _append_board_ops_with_ids(conn: sqlite3.Connection, board_id: str, ops: list[dict[str, Any]]) -> tuple[str, list[int]]:
+    if not ops:
+        updated_at = now_iso()
+        conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
+        return updated_at, []
+
+    ts = now_iso()
+    op_ids = []
+    for op in ops:
+        cursor = conn.execute(
+            "INSERT INTO board_ops (board_id, op_json, created_at) VALUES (?, ?, ?)",
+            (board_id, json.dumps(op, ensure_ascii=False), ts),
+        )
+        op_ids.append(cursor.lastrowid)
+
+    updated_at = now_iso()
+    conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
+    return updated_at, op_ids
+
+
+def _db_update(board_id: str, new_canvas: dict[str, Any], user: UserContext) -> tuple[list[dict[str, Any]], str, list[int], bool, dict[str, Any]]:
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        old_canvas = _read_board_canvas(conn, board_id)
+        action = _build_action(old_canvas, new_canvas)
+        applied_ops = []
+        if action:
+            _extract_added_objects(action, new_canvas)
+            added_ids = set(action.get("added_ids", []))
+            for obj in action.get("added_objects", []):
+                if isinstance(obj, dict):
+                    applied_ops.append({"type": "add", "object": obj})
+            for obj in action.get("modified_after", []):
+                if isinstance(obj, dict) and obj.get("obj_id") not in added_ids:
+                    applied_ops.append({"type": "update", "object": obj})
+            for obj in action.get("removed_objects", []):
+                obj_id = obj.get("obj_id") if isinstance(obj, dict) else None
+                if isinstance(obj_id, str) and obj_id:
+                    applied_ops.append({"type": "remove", "obj_id": obj_id})
+
+        _ensure_board_size_limit(new_canvas)
+        updated_at, op_ids = _append_board_ops_with_ids(conn, board_id, applied_ops)
+        
+        compact_stats = conn.execute(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(op_json)), 0) AS bytes FROM board_ops WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()
+        op_count = int(compact_stats["cnt"]) if compact_stats else 0
+        op_bytes = int(compact_stats["bytes"]) if compact_stats else 0
+        should_compact = (op_count >= OPS_COMPACT_COUNT_THRESHOLD or op_bytes >= OPS_COMPACT_BYTES_THRESHOLD)
+
+        conn.commit()
+        return applied_ops, updated_at, op_ids, should_compact, action
+    except Exception as exc:
+        conn.rollback()
+        raise exc
+    finally:
+        conn.close()
+
+
+def _db_apply_ops(board_id: str, ops: list[dict[str, Any]], user: UserContext) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, list[int], bool]:
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _read_board_canvas(conn, board_id)
+        next_canvas, applied_ops, inverse_ops = _apply_ops_build_inverse(current, ops, user)
+        if not applied_ops:
+            conn.commit()
+            return [], [], now_iso(), [], False
+
+        _ensure_board_size_limit(next_canvas)
+        updated_at, op_ids = _append_board_ops_with_ids(conn, board_id, applied_ops)
+        
+        compact_stats = conn.execute(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(op_json)), 0) AS bytes FROM board_ops WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()
+        op_count = int(compact_stats["cnt"]) if compact_stats else 0
+        op_bytes = int(compact_stats["bytes"]) if compact_stats else 0
+        should_compact = (op_count >= OPS_COMPACT_COUNT_THRESHOLD or op_bytes >= OPS_COMPACT_BYTES_THRESHOLD)
+
+        conn.commit()
+        return applied_ops, inverse_ops, updated_at, op_ids, should_compact
+    except Exception as exc:
+        conn.rollback()
+        raise exc
+    finally:
+        conn.close()
+
+
+def _db_clear(board_id: str, cleared_canvas: dict[str, Any]) -> str:
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        updated_at = now_iso()
+        conn.execute("DELETE FROM board_ops WHERE board_id = ?", (board_id,))
+        conn.execute(
+            "UPDATE boards SET canvas_json = ?, updated_at = ?, last_compacted_seq_id = 0 WHERE board_id = ?",
+            (json.dumps(cleared_canvas, ensure_ascii=False), updated_at, board_id)
+        )
+        conn.commit()
+        return updated_at
+    except Exception as exc:
+        conn.rollback()
+        raise exc
+    finally:
+        conn.close()
+
+
+def _db_undo(board_id: str, action: Any, user: UserContext) -> tuple[list[dict[str, Any]], dict[str, Any], str, list[int], bool]:
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _read_board_canvas(conn, board_id)
+        if isinstance(action, dict) and isinstance(action.get("undo_ops"), list):
+            applied_ops = action["undo_ops"]
+            next_canvas = _apply_prepared_ops(
+                current,
+                applied_ops,
+                user,
+            )
+        else:
+            next_canvas = _apply_undo_action(current, action)
+            next_canvas = _normalize_canvas(next_canvas, user)
+            applied_ops = []
+
+        _ensure_board_size_limit(next_canvas)
+        if applied_ops:
+            updated_at, op_ids = _append_board_ops_with_ids(conn, board_id, applied_ops)
+        else:
+            updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
+            op_ids = []
+
+        compact_stats = conn.execute(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(op_json)), 0) AS bytes FROM board_ops WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()
+        op_count = int(compact_stats["cnt"]) if compact_stats else 0
+        op_bytes = int(compact_stats["bytes"]) if compact_stats else 0
+        should_compact = (op_count >= OPS_COMPACT_COUNT_THRESHOLD or op_bytes >= OPS_COMPACT_BYTES_THRESHOLD)
+
+        conn.commit()
+        return applied_ops, next_canvas, updated_at, op_ids, should_compact
+    except Exception as exc:
+        conn.rollback()
+        raise exc
+    finally:
+        conn.close()
+
+
+def _db_redo(board_id: str, action: Any, user: UserContext) -> tuple[list[dict[str, Any]], dict[str, Any], str, list[int], bool]:
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _read_board_canvas(conn, board_id)
+        if isinstance(action, dict) and isinstance(action.get("redo_ops"), list):
+            applied_ops = action["redo_ops"]
+            next_canvas = _apply_prepared_ops(
+                current,
+                applied_ops,
+                user,
+            )
+        else:
+            next_canvas = _apply_redo_action_with_added(current, action)
+            next_canvas = _normalize_canvas(next_canvas, user)
+            applied_ops = []
+
+        _ensure_board_size_limit(next_canvas)
+        if applied_ops:
+            updated_at, op_ids = _append_board_ops_with_ids(conn, board_id, applied_ops)
+        else:
+            updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
+            op_ids = []
+
+        compact_stats = conn.execute(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(LENGTH(op_json)), 0) AS bytes FROM board_ops WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()
+        op_count = int(compact_stats["cnt"]) if compact_stats else 0
+        op_bytes = int(compact_stats["bytes"]) if compact_stats else 0
+        should_compact = (op_count >= OPS_COMPACT_COUNT_THRESHOLD or op_bytes >= OPS_COMPACT_BYTES_THRESHOLD)
+
+        conn.commit()
+        return applied_ops, next_canvas, updated_at, op_ids, should_compact
+    except Exception as exc:
+        conn.rollback()
+        raise exc
     finally:
         conn.close()
 
@@ -533,17 +1003,21 @@ def ensure_user_board_access(conn: sqlite3.Connection, board_id: str, user: User
         conn.commit()
         return "owner"
 
+    # Only provision a default 'editor' row the first time this user touches the
+    # board. If a membership row already exists, leave it untouched: an owner
+    # may have explicitly set it to 'viewer' via /api/board/{id}/members, and
+    # that choice must not be silently overwritten on the user's next page
+    # load/reconnect.
     conn.execute(
         """
         INSERT INTO board_members (board_id, user_id, role, created_at)
         VALUES (?, ?, 'editor', ?)
-        ON CONFLICT(board_id, user_id)
-        DO UPDATE SET role = CASE WHEN board_members.role = 'owner' THEN board_members.role ELSE 'editor' END
+        ON CONFLICT(board_id, user_id) DO NOTHING
         """,
         (board_id, user.user_id, ts),
     )
     conn.commit()
-    return "editor"
+    return get_user_role(conn, board_id, user.user_id) or "editor"
 
 
 @app.get("/health")
@@ -732,7 +1206,7 @@ def admin_delete_board(board_id: str, _: None = Depends(authenticate_service_key
 
 
 @app.post("/api/board/{board_id}/members")
-def upsert_member(board_id: str, body: MemberRequest, user: UserContext = Depends(authenticate_request)):
+async def upsert_member(board_id: str, body: MemberRequest, user: UserContext = Depends(authenticate_request)):
     conn = get_db()
     try:
         row = ensure_board_exists(conn, board_id)
@@ -749,13 +1223,15 @@ def upsert_member(board_id: str, body: MemberRequest, user: UserContext = Depend
             (board_id, body.user_id, body.role, now_iso()),
         )
         conn.commit()
-        return {"ok": True}
     finally:
         conn.close()
 
+    await _push_role_update(board_id, body.user_id, body.role)
+    return {"ok": True}
+
 
 @app.delete("/api/board/{board_id}/members/{member_id}")
-def remove_member(board_id: str, member_id: str, user: UserContext = Depends(authenticate_request)):
+async def remove_member(board_id: str, member_id: str, user: UserContext = Depends(authenticate_request)):
     conn = get_db()
     try:
         row = ensure_board_exists(conn, board_id)
@@ -769,9 +1245,11 @@ def remove_member(board_id: str, member_id: str, user: UserContext = Depends(aut
             (board_id, member_id),
         )
         conn.commit()
-        return {"ok": True}
     finally:
         conn.close()
+
+    await _push_role_update(board_id, member_id, "viewer")
+    return {"ok": True}
 
 
 @app.post("/api/ws-token/refresh")
@@ -1022,21 +1500,22 @@ def _apply_ops_build_inverse(
     return canvas_json, applied_ops, inverse_ops
 
 
-def _decorate_ops_for_wire(ops: list[dict[str, Any]], session: dict[str, Any]) -> list[dict[str, Any]]:
+def _decorate_ops_for_wire(ops: list[dict[str, Any]], session: dict[str, Any], op_ids: Optional[list[int]] = None) -> list[dict[str, Any]]:
     now_ms = int(time.time() * 1000)
     client_id = str(session.get("client_id") or "")
     decorated: list[dict[str, Any]] = []
-    for index, op in enumerate(ops, start=1):
+    for index, op in enumerate(ops):
         if not isinstance(op, dict):
             continue
         op_name = str(op.get("type") or op.get("op") or "").lower()
         if op_name not in {"add", "update", "remove"}:
             continue
+        seq_num = op_ids[index] if (op_ids and index < len(op_ids)) else (now_ms + index + 1)
         payload: dict[str, Any] = {
             "v": 1,
             "op": op_name,
             "client_id": client_id,
-            "seq": now_ms + index,
+            "seq": seq_num,
             "ts": now_ms,
             "action_id": _new_id(),
             "surface_id": DEFAULT_SURFACE_ID,
@@ -1087,6 +1566,25 @@ sio = socketio.AsyncServer(
     engineio_logger=False,
     max_http_buffer_size=SOCKET_MAX_BUFFER_BYTES,
 )
+
+
+async def _push_role_update(board_id: str, user_id: str, new_role: str) -> None:
+    """
+    Update the cached board_role on every live socket session for this user and
+    notify their client, so a permission grant/revoke takes effect immediately
+    instead of only after the user reconnects (board_role was previously read
+    once at connect() and never refreshed).
+    """
+    room = board_manager.online.get(board_id, {})
+    target_sids = [sid for sid, info in room.items() if info.get("user_id") == user_id]
+    for sid in target_sids:
+        try:
+            session = await sio.get_session(sid)
+        except Exception:
+            continue
+        session["board_role"] = new_role
+        await sio.save_session(sid, session)
+        await sio.emit("role_update", {"board_id": board_id, "role": new_role}, to=sid)
 
 
 def _read_board_canvas(conn: sqlite3.Connection, board_id: str) -> dict[str, Any]:
@@ -1221,18 +1719,21 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
     except HTTPException as exc:
         raise ConnectionRefusedError(exc.detail)
 
-    conn = get_db()
-    try:
+    last_seen_seq = 0
+    if isinstance(auth, dict) and "last_seen_seq" in auth:
         try:
-            ensure_user_board_access(conn, board_id, user)
-            ensure_board_exists(conn, board_id)
-            board_role = require_role(conn, board_id, user.user_id, "viewer")
-            canvas_json = _read_board_canvas(conn, board_id)
-            allow_students_draw = board_allows_students_draw(conn, board_id)
-        except HTTPException as exc:
-            raise ConnectionRefusedError(exc.detail)
-    finally:
-        conn.close()
+            last_seen_seq = int(auth["last_seen_seq"])
+        except (ValueError, TypeError):
+            pass
+
+    try:
+        board_role, allow_students_draw, canvas_json, last_compacted, max_op_id = await board_task_manager.run(
+            board_id, _load_connect_data, board_id, user
+        )
+    except HTTPException as exc:
+        raise ConnectionRefusedError(exc.detail)
+    except Exception as exc:
+        raise ConnectionRefusedError(str(exc))
 
     client_id = uuid.uuid4().hex[:12]
     await sio.save_session(
@@ -1253,11 +1754,24 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
     await sio.enter_room(sid, board_id)
     board_manager.add(board_id, sid, user.user_id, user.username, user.role, client_id)
 
+    status = "init"
+    missed_ops = []
+
+    if last_seen_seq > 0 and last_seen_seq >= last_compacted:
+        status = "sync"
+        canvas_json = None
+        try:
+            missed_ops = await board_task_manager.run(board_id, _get_missed_ops, board_id, last_seen_seq)
+        except Exception:
+            pass
+
     await sio.emit(
         "init",
         {
             "board_id": board_id,
+            "status": status,
             "canvas_json": canvas_json,
+            "last_seq_id": max_op_id,
             "role": board_role,
             "client_id": client_id,
             "username": user.username,
@@ -1273,6 +1787,18 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any):
         },
         to=sid,
     )
+
+    if status == "sync" and missed_ops:
+        session = await sio.get_session(sid)
+        wire_ops = _decorate_ops_for_wire(missed_ops, session, [op["seq"] for op in missed_ops])
+        payload = {
+            "board_id": board_id,
+            "ops": wire_ops,
+            "updated_at": now_iso(),
+            "author": "system"
+        }
+        await sio.emit("batch_update", payload, to=sid)
+
     await sio.emit("presence", {"online": board_manager.online_count(board_id)}, room=board_id)
 
 
@@ -1332,47 +1858,38 @@ async def update(sid: str, data: Any):
     )
     new_canvas = _normalize_canvas(data["canvas_json"], user)
 
-    applied_ops: list[dict[str, Any]] = []
-    conn = get_db()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        old_canvas = _read_board_canvas(conn, board_id)
-        action = _build_action(old_canvas, new_canvas)
-        if action:
-            _extract_added_objects(action, new_canvas)
-            actor_key = _history_actor_key(session)
-            user_hist = board_manager.get_user_history(board_id, actor_key)
-            user_hist["undo"].append(action)
-            if len(user_hist["undo"]) > 100:
-                user_hist["undo"] = user_hist["undo"][-100:]
-            user_hist["redo"].clear()
+        applied_ops, updated_at, op_ids, should_compact, action = await board_task_manager.run(
+            board_id, _db_update, board_id, new_canvas, user
+        )
+    except ValueError:
+        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        canvas_json, max_op_id = await board_task_manager.run(board_id, _db_read_canvas_and_max_id, board_id)
+        await sio.emit("update", {
+            "board_id": board_id,
+            "canvas_json": canvas_json,
+            "updated_at": now_iso(),
+            "author": "system",
+            "last_seq_id": max_op_id
+        }, to=sid)
+        return
+    except Exception as exc:
+        await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
+        return
 
-            added_ids = set(action.get("added_ids", []))
-            for obj in action.get("added_objects", []):
-                if isinstance(obj, dict):
-                    applied_ops.append({"type": "add", "object": obj})
-            for obj in action.get("modified_after", []):
-                if isinstance(obj, dict) and obj.get("obj_id") not in added_ids:
-                    applied_ops.append({"type": "update", "object": obj})
-            for obj in action.get("removed_objects", []):
-                obj_id = obj.get("obj_id") if isinstance(obj, dict) else None
-                if isinstance(obj_id, str) and obj_id:
-                    applied_ops.append({"type": "remove", "obj_id": obj_id})
-
-        try:
-            _ensure_board_size_limit(new_canvas)
-            updated_at = _append_board_ops(conn, board_id, applied_ops)
-            conn.commit()
-        except ValueError:
-            conn.rollback()
-            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
-            return
-    finally:
-        conn.close()
+    if should_compact:
+        trigger_compaction_debounced(board_id)
 
     user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
+    if action:
+        _extract_added_objects(action, new_canvas)
+        user_hist["undo"].append(action)
+        if len(user_hist["undo"]) > 100:
+            user_hist["undo"] = user_hist["undo"][-100:]
+        user_hist["redo"].clear()
+
     if applied_ops:
-        wire_ops = _decorate_ops_for_wire(applied_ops, session)
+        wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {
             "board_id": board_id,
             "ops": wire_ops,
@@ -1431,39 +1948,44 @@ async def _process_ops_event(sid: str, data: Any):
         payload={"user_id": session["user_id"]},
     )
 
-    conn = get_db()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        current = _read_board_canvas(conn, board_id)
-        next_canvas, applied_ops, inverse_ops = _apply_ops_build_inverse(current, data["ops"], user)
-        if not applied_ops:
-            conn.commit()
-            hist = board_manager.get_user_history(board_id, _history_actor_key(session))
-            await sio.emit(
-                "history_state",
-                {"undo_available": bool(hist["undo"]), "redo_available": bool(hist["redo"])},
-                to=sid,
-            )
-            return
+        applied_ops, inverse_ops, updated_at, op_ids, should_compact = await board_task_manager.run(
+            board_id, _db_apply_ops, board_id, data["ops"], user
+        )
+    except ValueError:
+        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        canvas_json, max_op_id = await board_task_manager.run(board_id, _db_read_canvas_and_max_id, board_id)
+        await sio.emit("update", {
+            "board_id": board_id,
+            "canvas_json": canvas_json,
+            "updated_at": now_iso(),
+            "author": "system",
+            "last_seq_id": max_op_id
+        }, to=sid)
+        return
+    except Exception as exc:
+        await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
+        return
 
-        try:
-            _ensure_board_size_limit(next_canvas)
-            updated_at = _append_board_ops(conn, board_id, applied_ops)
-            conn.commit()
-        except ValueError:
-            conn.rollback()
-            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
-            return
-    finally:
-        conn.close()
+    if should_compact:
+        trigger_compaction_debounced(board_id)
 
     user_hist = board_manager.get_user_history(board_id, _history_actor_key(session))
+    
+    if not applied_ops:
+        await sio.emit(
+            "history_state",
+            {"undo_available": bool(user_hist["undo"]), "redo_available": bool(user_hist["redo"])},
+            to=sid,
+        )
+        return
+
     user_hist["undo"].append({"undo_ops": inverse_ops, "redo_ops": applied_ops})
     if len(user_hist["undo"]) > 200:
         user_hist["undo"] = user_hist["undo"][-200:]
     user_hist["redo"].clear()
 
-    wire_ops = _decorate_ops_for_wire(applied_ops, session)
+    wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
     payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
     await sio.emit("batch_update", payload, room=board_id, skip_sid=sid)
     await sio.emit("ops", payload, room=board_id, skip_sid=sid)
@@ -1483,15 +2005,12 @@ async def clear(sid: str):
 
     board_id = session["board_id"]
     cleared = default_canvas_state()
-    conn = get_db()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        updated_at = now_iso()
-        conn.execute("DELETE FROM board_ops WHERE board_id = ?", (board_id,))
-        conn.execute("UPDATE boards SET updated_at = ? WHERE board_id = ?", (updated_at, board_id))
-        conn.commit()
-    finally:
-        conn.close()
+        updated_at = await board_task_manager.run(board_id, _db_clear, board_id, cleared)
+    except Exception as exc:
+        await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
+        return
+        
     board_manager.history[board_id] = {}
 
     await sio.emit(
@@ -1532,38 +2051,26 @@ async def undo(sid: str):
         return
 
     action = user_hist["undo"].pop()
-    conn = get_db()
+    user = UserContext(session["user_id"], session["username"], session["jwt_role"], {})
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        current = _read_board_canvas(conn, board_id)
-        if isinstance(action, dict) and isinstance(action.get("undo_ops"), list):
-            applied_ops = action["undo_ops"]
-            next_canvas = _apply_prepared_ops(
-                current,
-                applied_ops,
-                UserContext(session["user_id"], session["username"], session["jwt_role"], {}),
-            )
-        else:
-            next_canvas = _apply_undo_action(current, action)
-            next_canvas = _normalize_canvas(next_canvas, UserContext(session["user_id"], session["username"], session["jwt_role"], {}))
-            applied_ops = []
-        try:
-            _ensure_board_size_limit(next_canvas)
-            if applied_ops:
-                updated_at = _append_board_ops(conn, board_id, applied_ops)
-            else:
-                updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
-            conn.commit()
-        except ValueError:
-            conn.rollback()
-            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
-            return
-    finally:
-        conn.close()
+        applied_ops, next_canvas, updated_at, op_ids, should_compact = await board_task_manager.run(
+            board_id, _db_undo, board_id, action, user
+        )
+    except ValueError:
+        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        user_hist["undo"].append(action)
+        return
+    except Exception as exc:
+        await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
+        user_hist["undo"].append(action)
+        return
+
+    if should_compact:
+        trigger_compaction_debounced(board_id)
 
     user_hist["redo"].append(action)
     if applied_ops:
-        wire_ops = _decorate_ops_for_wire(applied_ops, session)
+        wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
         await sio.emit("batch_update", payload, room=board_id)
         await sio.emit("ops", payload, room=board_id)
@@ -1598,38 +2105,26 @@ async def redo(sid: str):
         return
 
     action = user_hist["redo"].pop()
-    conn = get_db()
+    user = UserContext(session["user_id"], session["username"], session["jwt_role"], {})
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        current = _read_board_canvas(conn, board_id)
-        if isinstance(action, dict) and isinstance(action.get("redo_ops"), list):
-            applied_ops = action["redo_ops"]
-            next_canvas = _apply_prepared_ops(
-                current,
-                applied_ops,
-                UserContext(session["user_id"], session["username"], session["jwt_role"], {}),
-            )
-        else:
-            next_canvas = _apply_redo_action_with_added(current, action)
-            next_canvas = _normalize_canvas(next_canvas, UserContext(session["user_id"], session["username"], session["jwt_role"], {}))
-            applied_ops = []
-        try:
-            _ensure_board_size_limit(next_canvas)
-            if applied_ops:
-                updated_at = _append_board_ops(conn, board_id, applied_ops)
-            else:
-                updated_at = _replace_board_canvas_baseline(conn, board_id, next_canvas)
-            conn.commit()
-        except ValueError:
-            conn.rollback()
-            await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
-            return
-    finally:
-        conn.close()
+        applied_ops, next_canvas, updated_at, op_ids, should_compact = await board_task_manager.run(
+            board_id, _db_redo, board_id, action, user
+        )
+    except ValueError:
+        await sio.emit("error_msg", {"message": "Board size exceeds 15 MB"}, to=sid)
+        user_hist["redo"].append(action)
+        return
+    except Exception as exc:
+        await sio.emit("error_msg", {"message": f"Database error: {str(exc)}"}, to=sid)
+        user_hist["redo"].append(action)
+        return
+
+    if should_compact:
+        trigger_compaction_debounced(board_id)
 
     user_hist["undo"].append(action)
     if applied_ops:
-        wire_ops = _decorate_ops_for_wire(applied_ops, session)
+        wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
         await sio.emit("batch_update", payload, room=board_id)
         await sio.emit("ops", payload, room=board_id)

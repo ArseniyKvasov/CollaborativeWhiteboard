@@ -1,8 +1,10 @@
 import asyncio
+import html
 import io
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -12,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs
 
+import httpx
 import jwt
 import redis.asyncio as aioredis
 import socketio
@@ -116,6 +119,12 @@ UPLOAD_IMAGE_MAX_SIDE = 2400
 UPLOAD_IMAGE_WEBP_QUALITY = 82
 OPS_COMPACT_BYTES_THRESHOLD = 4 * 1024 * 1024
 
+MIRO_API_BASE = os.getenv("MIRO_API_BASE", "https://api.miro.com/v2")
+MIRO_IMPORT_MAX_ITEMS = int(os.getenv("MIRO_IMPORT_MAX_ITEMS", "300"))
+MIRO_IMPORT_PAGE_SIZE = 50
+MIRO_IMPORT_HTTP_TIMEOUT = 20.0
+STICKER_DEFAULT_FILL = "#fef08a"
+
 
 @dataclass
 class UserContext:
@@ -145,6 +154,14 @@ class DrawingPolicyRequest(BaseModel):
 class WsTokenRefreshRequest(BaseModel):
     board_id: str = Field(min_length=1, max_length=128)
     refresh_token: str = Field(min_length=1)
+
+
+class MiroImportRequest(BaseModel):
+    miro_board_id: str = Field(min_length=1, max_length=128)
+    # A Miro personal access token (Settings -> Your apps -> a token with
+    # boards:read scope), pasted in by the user. Simpler than a full OAuth app
+    # registration/redirect flow for a first version; not stored server-side.
+    miro_token: str = Field(min_length=1)
 
 
 try:
@@ -1261,6 +1278,337 @@ async def upload_image(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {"url": url, "width": width, "height": height}
+
+
+# --- Miro import -----------------------------------------------------------
+#
+# Maps Miro REST API v2 board items (https://developers.miro.com/reference/get-items)
+# onto this app's Fabric.js object model, so an imported board can be applied
+# through the same op-based sync path as a live edit. Field names below match
+# Miro's documented v2 item schema (data/style/position/geometry); since this
+# couldn't be verified against a real Miro board/token in this environment,
+# field lookups are defensive (multiple fallbacks, per-item try/except) so one
+# unexpected shape doesn't abort the whole import - treat this as a first cut
+# that should be checked against a real Miro board before relying on it.
+
+MIRO_SHAPE_TO_LOCAL = {
+    "rectangle": "rect",
+    "round_rectangle": "rect",
+    "square": "rect",
+    "circle": "ellipse",
+    "ellipse": "ellipse",
+    "triangle": "triangle",
+    "rhombus": "diamond",
+    "diamond": "diamond",
+}
+
+
+def _miro_html_to_plain_text(value: Optional[str]) -> str:
+    """Miro item text content is a small HTML fragment (e.g. "<p>Hello</p>").
+    This app's text/sticker objects are plain text, so strip tags."""
+    if not isinstance(value, str) or not value:
+        return ""
+    text = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    text = re.sub(r"</p>\s*<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
+_HEX_COLOR_RE = re.compile(r"^[0-9a-fA-F]{3,8}$")
+
+
+def _miro_hex_color(value: Any, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        v = value.strip()
+        if v.startswith("#") or not _HEX_COLOR_RE.match(v):
+            # Already prefixed, or a CSS keyword/function Miro sent as-is
+            # (e.g. "transparent", "none", "rgba(...)") - pass through rather
+            # than mangling it into an invalid "#transparent".
+            return v
+        return f"#{v}"
+    return default
+
+
+def _miro_item_geometry(item: dict[str, Any]) -> tuple[float, float, float, float]:
+    """Returns (left, top, width, height) in local canvas units. Miro positions
+    are center-origin by default (position.origin == "center")."""
+    position = item.get("position") or {}
+    geometry = item.get("geometry") or {}
+    width = float(geometry.get("width") or 160)
+    height = float(geometry.get("height") or 100)
+    cx = float(position.get("x") or 0)
+    cy = float(position.get("y") or 0)
+    origin = str(position.get("origin") or "center")
+    if origin == "center":
+        left = cx - width / 2
+        top = cy - height / 2
+    else:
+        left = cx
+        top = cy
+    return left, top, width, height
+
+
+def _diamond_points(width: float, height: float) -> list[dict[str, float]]:
+    return [
+        {"x": width / 2, "y": 0},
+        {"x": width, "y": height / 2},
+        {"x": width / 2, "y": height},
+        {"x": 0, "y": height / 2},
+    ]
+
+
+def _build_sticker_object(obj_id: str, user: UserContext, left, top, width, height, color, text) -> dict[str, Any]:
+    pad = 14.0
+    # Fabric Group children are positioned relative to the GROUP'S CENTER,
+    # not in absolute canvas coordinates, regardless of the group's own
+    # originX/Y. Confirmed by inspecting how the client's own arrow-group
+    # serializes: its Line/Polygon children end up with small
+    # center-relative left/top values, not their original absolute points.
+    # Getting this wrong doesn't error - it just silently renders the
+    # children far outside the group's visible bounding box.
+    rect = {
+        "type": "Rect",
+        "left": -width / 2,
+        "top": -height / 2,
+        "width": width,
+        "height": height,
+        "rx": 12,
+        "ry": 12,
+        "fill": color,
+        "stroke": "rgba(15,23,42,0.14)",
+        "strokeWidth": 1,
+        "originX": "left",
+        "originY": "top",
+    }
+    textbox = {
+        "type": "Textbox",
+        "left": -width / 2 + pad,
+        "top": -height / 2 + pad,
+        "width": max(10.0, width - pad * 2),
+        "text": text or "",
+        "fontSize": 18,
+        "fontFamily": "Montserrat, sans-serif",
+        "fontWeight": "500",
+        "fill": "#1f2937",
+        "originX": "left",
+        "originY": "top",
+    }
+    return {
+        "type": "Group",
+        "obj_id": obj_id,
+        "author_id": user.user_id,
+        "author_name": user.username,
+        "shapeKind": "sticker",
+        "left": left,
+        "top": top,
+        "width": width,
+        "height": height,
+        "originX": "left",
+        "originY": "top",
+        "subTargetCheck": False,
+        "lockUniScaling": True,
+        "lockScalingFlip": True,
+        "objects": [rect, textbox],
+    }
+
+
+def _map_miro_item_to_object(item: dict[str, Any], user: UserContext) -> Optional[dict[str, Any]]:
+    try:
+        item_type = str(item.get("type") or "")
+        data = item.get("data") or {}
+        style = item.get("style") or {}
+        obj_id = uuid.uuid4().hex
+
+        if item_type == "sticky_note":
+            left, top, width, height = _miro_item_geometry(item)
+            color = _miro_hex_color(style.get("fillColor"), STICKER_DEFAULT_FILL)
+            text = _miro_html_to_plain_text(data.get("content"))
+            return _build_sticker_object(obj_id, user, left, top, width, height, color, text)
+
+        if item_type == "text":
+            left, top, _width, _height = _miro_item_geometry(item)
+            return {
+                "type": "IText",
+                "obj_id": obj_id,
+                "author_id": user.user_id,
+                "author_name": user.username,
+                "left": left,
+                "top": top,
+                "text": _miro_html_to_plain_text(data.get("content")) or " ",
+                "fill": _miro_hex_color(style.get("color"), "#1f2937"),
+                "fontSize": float(style.get("fontSize") or 20),
+                "fontFamily": "Montserrat, sans-serif",
+                "fontWeight": "500",
+            }
+
+        if item_type == "shape":
+            left, top, width, height = _miro_item_geometry(item)
+            miro_shape = str(data.get("shape") or "rectangle").lower()
+            local_shape = MIRO_SHAPE_TO_LOCAL.get(miro_shape, "rect")
+            stroke = _miro_hex_color(style.get("borderColor"), "#1f2937")
+            stroke_width = float(style.get("borderWidth") or 2)
+            fill = _miro_hex_color(style.get("fillColor"), "transparent")
+            common = {
+                "obj_id": obj_id,
+                "author_id": user.user_id,
+                "author_name": user.username,
+                "left": left,
+                "top": top,
+                "fill": fill,
+                "stroke": stroke,
+                "strokeWidth": stroke_width,
+                "originX": "left",
+                "originY": "top",
+            }
+            if local_shape == "ellipse":
+                common.update({"type": "Ellipse", "rx": width / 2, "ry": height / 2})
+            elif local_shape == "diamond":
+                common.update({"type": "Polygon", "points": _diamond_points(width, height)})
+            elif local_shape == "triangle":
+                common.update({"type": "Triangle", "width": width, "height": height})
+            else:
+                common.update({"type": "Rect", "width": width, "height": height})
+            # Note: Miro shapes can carry a text label (data.content), but this
+            # app's shape objects don't support an embedded label - it's
+            # dropped here rather than guessing at a lossy overlay-text object.
+            return common
+
+        if item_type == "image":
+            left, top, width, height = _miro_item_geometry(item)
+            url = data.get("url") or data.get("imageUrl") or data.get("resourceUrl")
+            if not isinstance(url, str) or not url:
+                return None
+            return {
+                "type": "Image",
+                "obj_id": obj_id,
+                "author_id": user.user_id,
+                "author_name": user.username,
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height,
+                "_miro_source_url": url,  # consumed before the object is stored, stripped after
+            }
+
+        # frame/card/app_card/document/embed: no equivalent object type yet in
+        # this app - skip rather than guess at a lossy mapping.
+        return None
+    except Exception as exc:
+        logger.warning("Skipping unmappable Miro item %s: %s", item.get("id"), exc)
+        return None
+
+
+async def _fetch_miro_items(miro_board_id: str, miro_token: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    cursor: Optional[str] = None
+    headers = {"Authorization": f"Bearer {miro_token}"}
+    async with httpx.AsyncClient(timeout=MIRO_IMPORT_HTTP_TIMEOUT) as client:
+        while len(items) < MIRO_IMPORT_MAX_ITEMS:
+            params: dict[str, Any] = {"limit": MIRO_IMPORT_PAGE_SIZE}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await client.get(f"{MIRO_API_BASE}/boards/{miro_board_id}/items", headers=headers, params=params)
+            if resp.status_code == 401:
+                raise HTTPException(status_code=401, detail="Invalid or expired Miro token")
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail="Miro board not found or not accessible with this token")
+            if resp.status_code >= 400:
+                raise HTTPException(status_code=502, detail=f"Miro API error: {resp.status_code}")
+            payload = resp.json()
+            page = payload.get("data") or []
+            items.extend(page)
+            cursor = payload.get("cursor")
+            if not cursor or not page:
+                break
+    return items[:MIRO_IMPORT_MAX_ITEMS]
+
+
+async def _download_and_store_miro_image(board_id: str, url: str, miro_token: str) -> Optional[tuple[str, int, int]]:
+    try:
+        async with httpx.AsyncClient(timeout=MIRO_IMPORT_HTTP_TIMEOUT) as client:
+            # Miro asset URLs are typically pre-signed/public; the token is
+            # attached defensively in case a given board requires it.
+            resp = await client.get(url, headers={"Authorization": f"Bearer {miro_token}"})
+            resp.raise_for_status()
+            raw = resp.content
+    except Exception as exc:
+        logger.warning("Failed to download Miro image %s: %s", url, exc)
+        return None
+    if len(raw) > MAX_UPLOAD_IMAGE_BYTES:
+        return None
+    try:
+        return await asyncio.to_thread(_process_and_store_image, board_id, raw)
+    except ValueError:
+        return None
+
+
+@app.post("/api/board/{board_id}/import/miro")
+async def import_from_miro(board_id: str, body: MiroImportRequest, user: UserContext = Depends(authenticate_request)):
+    conn = get_db()
+    try:
+        ensure_user_board_access(conn, board_id, user)
+        ensure_board_exists(conn, board_id)
+        require_role(conn, board_id, user.user_id, "editor")
+    finally:
+        conn.close()
+
+    miro_items = await _fetch_miro_items(body.miro_board_id, body.miro_token)
+
+    mapped_objects: list[dict[str, Any]] = []
+    skipped = 0
+    for item in miro_items:
+        obj = _map_miro_item_to_object(item, user)
+        if obj is None:
+            skipped += 1
+            continue
+        mapped_objects.append(obj)
+
+    # Images need their bytes downloaded from Miro and re-hosted locally
+    # (this app stores images as files under UPLOAD_DIR, not inline base64 -
+    # see _process_and_store_image) before they can be added as ops.
+    resolved_objects: list[dict[str, Any]] = []
+    for obj in mapped_objects:
+        source_url = obj.pop("_miro_source_url", None)
+        if source_url:
+            result = await _download_and_store_miro_image(board_id, source_url, body.miro_token)
+            if not result:
+                skipped += 1
+                continue
+            url, width, height = result
+            obj["src"] = url
+            obj["width"] = width
+            obj["height"] = height
+            obj["crossOrigin"] = "anonymous"
+        resolved_objects.append(obj)
+
+    if not resolved_objects:
+        return {"ok": True, "imported": 0, "skipped": skipped, "total": len(miro_items)}
+
+    ops = [{"type": "add", "object": obj} for obj in resolved_objects]
+
+    try:
+        applied_ops, _inverse_ops, updated_at, op_ids, should_compact = await board_task_manager.run(
+            board_id, _db_apply_ops, board_id, ops, user
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+    if should_compact:
+        trigger_compaction_debounced(board_id)
+
+    if applied_ops:
+        synthetic_session = {"client_id": f"miro-import:{user.user_id}", "user_id": user.user_id}
+        wire_ops = _decorate_ops_for_wire(applied_ops, synthetic_session, op_ids)
+        payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": user.user_id}
+        await sio.emit("batch_update", payload, room=board_id)
+        await sio.emit("ops", payload, room=board_id)
+
+    return {
+        "ok": True,
+        "imported": len(applied_ops),
+        "skipped": skipped,
+        "total": len(miro_items),
+    }
 
 
 @app.delete("/api/board/{board_id}")

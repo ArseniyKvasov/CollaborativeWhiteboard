@@ -27,6 +27,7 @@
   const clearBtn = document.getElementById("clearBtn");
   const mobileClearBtn = document.getElementById("mobileClearBtn");
   const bgBtn = document.getElementById("bgBtn");
+  const miroImportBtn = document.getElementById("miroImportBtn");
   const mobileBgBtn = document.getElementById("mobileBgBtn");
   const mobileMoreBtn = document.getElementById("mobileMoreBtn");
   const hiddenImageInput = document.getElementById("hiddenImageInput");
@@ -47,6 +48,13 @@
   const strokeWidthEl = document.getElementById("strokeWidth");
   const textSizeEl = document.getElementById("textSize");
   const cornerRadiusEl = document.getElementById("cornerRadius");
+  const selectionPalette = document.getElementById("selectionPalette");
+  const selectionColorRow = document.getElementById("selectionColorRow");
+  const selectionStrokeWidthEl = document.getElementById("selectionStrokeWidth");
+  const selectionStrokeWidthRow = document.getElementById("selectionStrokeWidthRow");
+  const cornerRadiusRow = document.getElementById("cornerRadiusRow");
+  const deleteSelectionBtn = document.getElementById("deleteSelectionBtn");
+  const stickerEditOverlay = document.getElementById("stickerEditOverlay");
 
   const zoomOutBtn = document.getElementById("zoomOutBtn");
   const zoomInBtn = document.getElementById("zoomInBtn");
@@ -60,6 +68,10 @@
   }
 
   const paletteColors = ["#1f2937", "#2563eb", "#0f766e", "#7c3aed", "#be123c", "#ea580c", "#16a34a"];
+  const STICKER_COLORS = ["#fef08a", "#fecaca", "#bbf7d0", "#bfdbfe", "#fde68a", "#e9d5ff"];
+  const STICKER_DEFAULT_W = 200;
+  const STICKER_DEFAULT_H = 160;
+  const STICKER_MIN_SIZE = 100;
   const cursorColors = ["#0d6efd", "#7c3aed", "#dc2626", "#0f766e", "#ea580c", "#9333ea", "#1d4ed8", "#0891b2"];
   const GRID_WORLD_SIZE = 24;
   const GRID_BG_IMAGE =
@@ -74,6 +86,7 @@
 
   let currentTool = "select";
   let currentShapeType = "arrow";
+  let currentStickerColor = STICKER_COLORS[0];
   let currentColor = paletteColors[0];
   let currentBackground = "grid";
   let canEdit = false;
@@ -533,6 +546,7 @@
     });
     imageToolBtn.disabled = !canEdit;
     if (mobileImageBtn) mobileImageBtn.disabled = !canEdit;
+    if (miroImportBtn) miroImportBtn.disabled = !canEdit;
     if (mobileBgBtn) mobileBgBtn.disabled = false;
     fabricCanvas.isDrawingMode = canEdit && currentTool === "pencil";
     fabricCanvas.selection = canEdit && currentTool === "select";
@@ -949,6 +963,7 @@
         arrow: '<span class="shape-arrow-glyph">↗</span>',
         triangle: '<span class="bi-local" style="--icon:url(\'/static/icons/triangle.svg\')"></span>',
         diamond: '<span class="bi-local" style="--icon:url(\'/static/icons/diamond.svg\')"></span>',
+        sticker: '<span class="bi-local" style="--icon:url(\'/static/icons/sticky-note.svg\')"></span>',
       };
       shapeToolBtn.innerHTML = shapeIconByType[currentShapeType] || shapeIconByType.rect;
     }
@@ -1200,16 +1215,266 @@
     );
   }
 
+  // --- Contextual selection panel (color / stroke width / corner radius / delete) ---
+  //
+  // Deliberately uses its own getPanelSelectionObjects() instead of the older
+  // getSelectionObjects(): that one treats ANY object with a getObjects()
+  // method as a "multi selection" and flattens it into its children, which is
+  // correct for a true multi-select (fabric.ActiveSelection) but wrong for a
+  // single grouped object (arrow, sticker) - flattening a sticker would expose
+  // its internal rect/textbox as if they were independent top-level objects.
+  const STROKE_SHAPE_TYPES = new Set(["rect", "ellipse", "triangle", "path", "line", "polyline", "polygon"]);
+
+  function isActiveSelectionObject(obj) {
+    return !!(obj && typeof obj.type === "string" && obj.type.toLowerCase() === "activeselection");
+  }
+
+  function getPanelSelectionObjects() {
+    const active = fabricCanvas.getActiveObject();
+    if (!active) return [];
+    return isActiveSelectionObject(active) ? active.getObjects() : [active];
+  }
+
+  function isStickerObject(obj) {
+    return !!(obj && obj.type === "group" && obj.shapeKind === "sticker");
+  }
+
+  function isArrowGroupObject(obj) {
+    return !!(obj && obj.type === "group" && !isStickerObject(obj));
+  }
+
+  function getStickerRectChild(group) {
+    if (!group || typeof group.getObjects !== "function") return null;
+    return group.getObjects().find((o) => o && o.type === "rect") || null;
+  }
+
+  function getStickerTextChild(group) {
+    if (!group || typeof group.getObjects !== "function") return null;
+    return group.getObjects().find((o) => o && o.type === "textbox") || null;
+  }
+
+  // Editing text inside a Fabric Group doesn't work out of the box - Fabric's
+  // native double-click-to-edit only fires on a directly-selected IText/Textbox,
+  // not a subTargetCheck:false group's children. Rather than fight Fabric's
+  // group/subtarget editing internals, overlay a plain HTML <textarea> on top
+  // of the sticker (positioned via the same screen-space conversion already
+  // used for the selection lock button) and write the result back on exit.
+  function enterStickerEditMode(group) {
+    if (!stickerEditOverlay || !canEdit) return;
+    const textChild = getStickerTextChild(group);
+    if (!textChild) return;
+    fabricCanvas.discardActiveObject();
+    group.setCoords();
+    const bounds = group.getBoundingRect();
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const topLeft = screenFromWorld(bounds.left, bounds.top);
+    const zoom = fabricCanvas.getZoom();
+
+    stickerEditOverlay.value = textChild.text || "";
+    stickerEditOverlay.style.left = `${canvasRect.left + topLeft.x}px`;
+    stickerEditOverlay.style.top = `${canvasRect.top + topLeft.y}px`;
+    stickerEditOverlay.style.width = `${bounds.width}px`;
+    stickerEditOverlay.style.height = `${bounds.height}px`;
+    stickerEditOverlay.style.fontSize = `${(Number(textChild.fontSize) || 18) * zoom}px`;
+    stickerEditOverlay.style.display = "block";
+    stickerEditOverlay.dataset.targetObjId = group.obj_id || "";
+
+    group.set({ opacity: 0 });
+    fabricCanvas.requestRenderAll();
+    requestAnimationFrame(() => {
+      stickerEditOverlay.focus();
+      stickerEditOverlay.select();
+    });
+  }
+
+  function exitStickerEditMode(commit) {
+    if (!stickerEditOverlay || stickerEditOverlay.style.display === "none") return;
+    const objId = stickerEditOverlay.dataset.targetObjId || "";
+    const value = stickerEditOverlay.value;
+    stickerEditOverlay.style.display = "none";
+    stickerEditOverlay.dataset.targetObjId = "";
+
+    const group = objId ? findObjectById(objId) : null;
+    if (!group) return;
+    group.set({ opacity: 1 });
+    if (commit) {
+      const textChild = getStickerTextChild(group);
+      if (textChild && textChild.text !== value) {
+        textChild.set({ text: value });
+        if (typeof textChild.initDimensions === "function") textChild.initDimensions();
+        group.dirty = true;
+        enqueueUpdateOp(group);
+      }
+    }
+    fabricCanvas.requestRenderAll();
+  }
+
+  function hasColorSupport(obj) {
+    if (!obj) return false;
+    if (obj.type === "i-text") return true;
+    if (isStickerObject(obj)) return true;
+    if (isArrowGroupObject(obj)) return true;
+    return STROKE_SHAPE_TYPES.has(obj.type);
+  }
+
+  function hasStrokeWidthSupport(obj) {
+    if (!obj) return false;
+    if (isStickerObject(obj)) return false;
+    if (isArrowGroupObject(obj)) return true;
+    return STROKE_SHAPE_TYPES.has(obj.type);
+  }
+
+  function getObjectDisplayColor(obj) {
+    if (!obj) return paletteColors[0];
+    if (obj.type === "i-text") return obj.fill || paletteColors[0];
+    if (isStickerObject(obj)) {
+      const rect = getStickerRectChild(obj);
+      return (rect && rect.fill) || STICKER_COLORS[0];
+    }
+    if (isArrowGroupObject(obj) && typeof obj.getObjects === "function") {
+      const child = obj.getObjects().find((c) => c && c.stroke);
+      return (child && child.stroke) || paletteColors[0];
+    }
+    return obj.stroke || paletteColors[0];
+  }
+
+  function getObjectStrokeWidthValue(obj) {
+    if (!obj) return 2;
+    if (isArrowGroupObject(obj) && typeof obj.getObjects === "function") {
+      const child = obj.getObjects().find((c) => c && typeof c.strokeWidth === "number");
+      return child ? Number(child.strokeWidth) : 2;
+    }
+    return Number(obj.strokeWidth) || 2;
+  }
+
+  function applyColorToObject(obj, color) {
+    if (!hasColorSupport(obj)) return false;
+    if (obj.type === "i-text") {
+      obj.set({ fill: color });
+      return true;
+    }
+    if (isStickerObject(obj)) {
+      const rect = getStickerRectChild(obj);
+      if (rect) rect.set({ fill: color });
+      obj.dirty = true;
+      return true;
+    }
+    if (isArrowGroupObject(obj) && typeof obj.getObjects === "function") {
+      obj.getObjects().forEach((child) => {
+        if (!child || typeof child.set !== "function") return;
+        child.set({ stroke: color });
+        if (child.type === "polygon") child.set({ fill: color });
+      });
+      obj.dirty = true;
+      return true;
+    }
+    obj.set({ stroke: color });
+    return true;
+  }
+
+  function applyStrokeWidthToObject(obj, width) {
+    if (!hasStrokeWidthSupport(obj)) return false;
+    if (isArrowGroupObject(obj) && typeof obj.getObjects === "function") {
+      obj.getObjects().forEach((child) => {
+        if (child && typeof child.set === "function") child.set({ strokeWidth: width });
+      });
+      obj.dirty = true;
+      return true;
+    }
+    obj.set({ strokeWidth: width });
+    return true;
+  }
+
+  function enqueuePanelSelectionUpdates(objs) {
+    const ops = objs
+      .filter((obj) => isSyncableObject(obj))
+      .map((obj) => buildAction("update", { object: serializeObject(obj) }));
+    enqueueOps(ops);
+  }
+
+  function applySelectionColor(color) {
+    const objs = getPanelSelectionObjects();
+    let changed = false;
+    objs.forEach((obj) => {
+      if (applyColorToObject(obj, color)) changed = true;
+    });
+    if (!changed) return;
+    fabricCanvas.requestRenderAll();
+    enqueuePanelSelectionUpdates(objs);
+    updateStylePanelVisibility();
+  }
+
+  function applySelectionStrokeWidth(width) {
+    const w = Number(width);
+    if (!Number.isFinite(w)) return;
+    const objs = getPanelSelectionObjects();
+    let changed = false;
+    objs.forEach((obj) => {
+      if (applyStrokeWidthToObject(obj, w)) changed = true;
+    });
+    if (!changed) return;
+    fabricCanvas.requestRenderAll();
+    enqueuePanelSelectionUpdates(objs);
+  }
+
+  function buildSelectionPalette(activeColor) {
+    if (!selectionPalette) return;
+    const objs = getPanelSelectionObjects();
+    const isStickerSelection = objs.length > 0 && objs.every(isStickerObject);
+    const colors = isStickerSelection ? STICKER_COLORS : paletteColors;
+
+    selectionPalette.innerHTML = "";
+    for (const color of colors) {
+      const btn = document.createElement("button");
+      btn.className = `swatch${color === activeColor ? " active" : ""}`;
+      btn.style.background = color;
+      btn.type = "button";
+      btn.title = color;
+      btn.addEventListener("click", () => applySelectionColor(color));
+      selectionPalette.appendChild(btn);
+    }
+
+    const usingCustom = !colors.includes(activeColor);
+    const customInput = document.createElement("input");
+    customInput.type = "color";
+    customInput.className = `swatch${usingCustom ? " active" : ""}`;
+    customInput.title = "Свой цвет";
+    customInput.style.padding = "0";
+    customInput.style.border = usingCustom ? "2px solid #0d6efd" : "2px solid transparent";
+    customInput.value = /^#[0-9a-fA-F]{6}$/.test(activeColor) ? activeColor : "#000000";
+    customInput.addEventListener("input", () => applySelectionColor(customInput.value));
+    selectionPalette.appendChild(customInput);
+  }
+
   function updateStylePanelVisibility() {
-    if (!stylePanel || !cornerRadiusEl) return;
-    const objs = getSelectionObjects().filter((o) => isCornerRadiusSupportedObject(o));
+    if (!stylePanel) return;
+    const objs = getPanelSelectionObjects();
     if (!objs.length) {
       stylePanel.classList.remove("active");
       updateUndoRedoDockVisibility();
       return;
     }
-    const avg = objs.reduce((acc, o) => acc + getObjectCornerRadius(o), 0) / objs.length;
-    cornerRadiusEl.value = String(Math.round(avg));
+
+    const colorObjs = objs.filter(hasColorSupport);
+    const strokeObjs = objs.filter(hasStrokeWidthSupport);
+    const cornerObjs = objs.filter((o) => isCornerRadiusSupportedObject(o));
+
+    if (selectionColorRow) selectionColorRow.style.display = colorObjs.length ? "" : "none";
+    if (selectionStrokeWidthRow) selectionStrokeWidthRow.style.display = strokeObjs.length ? "" : "none";
+    if (cornerRadiusRow) cornerRadiusRow.style.display = cornerObjs.length ? "" : "none";
+
+    if (colorObjs.length) {
+      buildSelectionPalette(getObjectDisplayColor(colorObjs[0]));
+    }
+    if (strokeObjs.length && selectionStrokeWidthEl) {
+      const avg = strokeObjs.reduce((acc, o) => acc + getObjectStrokeWidthValue(o), 0) / strokeObjs.length;
+      selectionStrokeWidthEl.value = String(Math.round(avg));
+    }
+    if (cornerObjs.length && cornerRadiusEl) {
+      const avg = cornerObjs.reduce((acc, o) => acc + getObjectCornerRadius(o), 0) / cornerObjs.length;
+      cornerRadiusEl.value = String(Math.round(avg));
+    }
+
     stylePanel.classList.add("active");
     updateUndoRedoDockVisibility();
   }
@@ -2067,10 +2332,13 @@
   function deleteActiveObjects() {
     const active = fabricCanvas.getActiveObject();
     if (!active) return;
-    const isMulti =
-      (typeof active.type === "string" && active.type.toLowerCase() === "activeselection")
-      || (typeof active.getObjects === "function" && Array.isArray(active.getObjects()) && active.getObjects().length > 0);
-    if (isMulti) {
+    // Bug fix: the old check here treated ANY object with a getObjects()
+    // method as a multi-selection, including a single grouped object (arrow,
+    // sticker) - it would then try to canvas.remove() the group's own
+    // children, which are not top-level canvas objects, so nothing actually
+    // happened. Deleting a lone arrow/sticker via Delete/Backspace or this
+    // button silently did nothing before this fix.
+    if (isActiveSelectionObject(active)) {
       const objects = typeof active.getObjects === "function" ? [...active.getObjects()] : [];
       fabricCanvas.discardActiveObject();
       objects.forEach((o) => fabricCanvas.remove(o));
@@ -2082,12 +2350,76 @@
     updateStylePanelVisibility();
   }
 
+  function createStickerGroup(left, top, width, height, color, text) {
+    const fillColor = color || currentStickerColor;
+    const pad = 14;
+    // Absolute canvas coordinates for both children, matching how the arrow
+    // shape below builds its group: Fabric derives the group's own bounding
+    // box from the children's absolute positions when left/top aren't passed
+    // in the group options.
+    const rect = new fabric.Rect({
+      left,
+      top,
+      width,
+      height,
+      rx: 12,
+      ry: 12,
+      fill: fillColor,
+      stroke: "rgba(15,23,42,0.14)",
+      strokeWidth: 1,
+      originX: "left",
+      originY: "top",
+    });
+    const textbox = new fabric.Textbox(text || "", {
+      left: left + pad,
+      top: top + pad,
+      width: Math.max(10, width - pad * 2),
+      fontSize: 18,
+      fontFamily: "Montserrat, sans-serif",
+      fontWeight: "500",
+      fill: "#1f2937",
+      originX: "left",
+      originY: "top",
+    });
+    const group = new fabric.Group([rect, textbox], {
+      subTargetCheck: false,
+      lockUniScaling: true,
+      lockScalingFlip: true,
+      shapeKind: "sticker",
+    });
+    ensureObjMeta(group);
+    return group;
+  }
+
   function createShape(type, start, end) {
     const x = Math.min(start.x, end.x);
     const y = Math.min(start.y, end.y);
     const width = Math.max(1, Math.abs(end.x - start.x));
     const height = Math.max(1, Math.abs(end.y - start.y));
     const strokeW = Number(strokeWidthEl.value);
+
+    if (type === "sticker") {
+      const dragW = Math.abs(end.x - start.x);
+      const dragH = Math.abs(end.y - start.y);
+      let w;
+      let h;
+      let left;
+      let top;
+      if (dragW < 20 && dragH < 20) {
+        // Plain click (no meaningful drag): drop a default-size note centered
+        // on the click point, like addImageAtWorldPoint does for images.
+        w = STICKER_DEFAULT_W;
+        h = STICKER_DEFAULT_H;
+        left = start.x - w / 2;
+        top = start.y - h / 2;
+      } else {
+        w = Math.max(STICKER_MIN_SIZE, dragW);
+        h = Math.max(STICKER_MIN_SIZE, dragH);
+        left = x;
+        top = y;
+      }
+      return createStickerGroup(left, top, w, h);
+    }
 
     if (type === "rect") {
       const rect = new fabric.Rect({
@@ -2396,8 +2728,14 @@
       drawingShape._isDraft = false;
       ensureObjMeta(drawingShape);
       enqueueAddOp(drawingShape);
+      const createdSticker = isStickerObject(drawingShape) ? drawingShape : null;
       drawingShape = null;
       drawingStart = null;
+      if (createdSticker) {
+        // Jump straight into text editing, same convenience as the text tool.
+        setTool("select");
+        enterStickerEditMode(createdSticker);
+      }
     }
 
   }
@@ -2545,6 +2883,22 @@
     updateLockButtonsState();
     updateRotateButtonState();
   });
+
+  fabricCanvas.on("mouse:dblclick", (opt) => {
+    if (!canEdit || currentTool !== "select") return;
+    const target = opt && opt.target;
+    if (isStickerObject(target)) enterStickerEditMode(target);
+  });
+
+  if (stickerEditOverlay) {
+    stickerEditOverlay.addEventListener("blur", () => exitStickerEditMode(true));
+    stickerEditOverlay.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        exitStickerEditMode(false);
+      }
+    });
+  }
 
   document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2721,6 +3075,19 @@
     });
   }
 
+  if (selectionStrokeWidthEl) {
+    selectionStrokeWidthEl.addEventListener("input", () => {
+      applySelectionStrokeWidth(selectionStrokeWidthEl.value);
+    });
+  }
+
+  if (deleteSelectionBtn) {
+    deleteSelectionBtn.addEventListener("click", () => {
+      if (!canEdit) return;
+      deleteActiveObjects();
+    });
+  }
+
   undoBtn.addEventListener("click", () => socket.emit("undo"));
   redoBtn.addEventListener("click", () => socket.emit("redo"));
   if (rotateBtn) {
@@ -2735,6 +3102,40 @@
   }
   clearBtn.addEventListener("click", () => socket.emit("clear"));
   bgBtn.addEventListener("click", toggleBackground);
+
+  if (miroImportBtn) {
+    miroImportBtn.addEventListener("click", async () => {
+      if (!canEdit) return;
+      const miroBoardId = window.prompt(
+        "ID доски Miro (из ссылки вида miro.com/app/board/XXXXXXXXXXX=/):",
+      );
+      if (!miroBoardId) return;
+      const miroToken = window.prompt("Miro personal access token (Settings → Your apps):");
+      if (!miroToken) return;
+
+      miroImportBtn.disabled = true;
+      showBoardNotice("Импортируем доску из Miro…");
+      try {
+        const headers = { "Content-Type": "application/json" };
+        if (pageToken) headers["Authorization"] = `Bearer ${pageToken}`;
+        const res = await fetch(`/api/board/${encodeURIComponent(boardId)}/import/miro`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ miro_board_id: miroBoardId.trim(), miro_token: miroToken.trim() }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showBoardError(data.detail || "Не удалось импортировать доску из Miro");
+          return;
+        }
+        showBoardNotice(`Импортировано объектов: ${data.imported}, пропущено: ${data.skipped}`);
+      } catch (err) {
+        showBoardError(err?.message || "Не удалось импортировать доску из Miro");
+      } finally {
+        miroImportBtn.disabled = false;
+      }
+    });
+  }
   if (mobileBgBtn) mobileBgBtn.addEventListener("click", toggleBackground);
 
   if (mobileImageBtn) {

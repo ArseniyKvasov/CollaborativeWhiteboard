@@ -49,6 +49,22 @@ services:
       redis:
         condition: service_healthy
 
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whiteboard-celery-worker
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./:/app
+    command: celery -A app.celery_app worker --loglevel=info
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_dev_data:
 

@@ -1,6 +1,5 @@
 import asyncio
 import html
-import io
 import json
 import logging
 import os
@@ -23,9 +22,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from starlette.requests import Request
+
+from app.celery_app import celery_app
+from app.image_processing import process_and_store_image
+from app.tasks import process_image_task
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -104,6 +106,12 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
+# Raw uploads are staged here just long enough for the Celery worker to pick
+# them up (see /upload-image below) - kept outside the public /uploads mount
+# since these are pre-compression originals, not something to ever serve.
+PENDING_UPLOAD_DIR = UPLOAD_DIR / "_pending"
+PENDING_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
 PENDING_OWNER_ID = "__pending_moderator__"
@@ -115,8 +123,6 @@ OPS_COMPACT_COUNT_THRESHOLD = 700
 # images to ~2MB/2400px before sending, this is just generous headroom for
 # clients that skip that step (or a future Miro import feeding raw images in).
 MAX_UPLOAD_IMAGE_BYTES = 10 * 1024 * 1024
-UPLOAD_IMAGE_MAX_SIDE = 2400
-UPLOAD_IMAGE_WEBP_QUALITY = 82
 OPS_COMPACT_BYTES_THRESHOLD = 4 * 1024 * 1024
 
 MIRO_API_BASE = os.getenv("MIRO_API_BASE", "https://api.miro.com/v2")
@@ -1218,46 +1224,25 @@ def save_board_state(board_id: str, body: SaveBoardRequest, user: UserContext = 
 
 
 def _process_and_store_image(board_id: str, raw: bytes) -> tuple[str, int, int]:
-    """
-    Downsize/re-encode an uploaded image to WEBP and save it under UPLOAD_DIR.
-    Runs in a worker thread (see upload_image) - Pillow is sync/CPU-bound, and
-    an already-client-compressed image (~2MB) processes in well under 100ms,
-    so doing this synchronously in the request (off the event loop) is simpler
-    than a background job/queue and keeps the "image appears" UX immediate.
-    A background queue only starts to pay for itself for bulk operations like
-    importing many images at once (e.g. a future Miro import), not single
-    interactive uploads.
-    """
-    try:
-        img = Image.open(io.BytesIO(raw))
-        img.load()
-    except Exception as exc:
-        raise ValueError("Invalid or unsupported image file") from exc
-
-    img = ImageOps.exif_transpose(img) or img
-    if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
-
-    width, height = img.size
-    longest = max(width, height)
-    if longest > UPLOAD_IMAGE_MAX_SIDE:
-        scale = UPLOAD_IMAGE_MAX_SIDE / longest
-        width = max(1, round(width * scale))
-        height = max(1, round(height * scale))
-        img = img.resize((width, height), Image.LANCZOS)
-
-    board_dir = UPLOAD_DIR / board_id
-    board_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{uuid.uuid4().hex}.webp"
-    img.save(board_dir / filename, format="WEBP", quality=UPLOAD_IMAGE_WEBP_QUALITY, method=6)
-
-    return f"/uploads/{board_id}/{filename}", width, height
+    """Sync helper kept for the Miro-import path (see below), which processes
+    a batch of images synchronously as part of one already-backgrounded admin
+    operation. Interactive single-image uploads instead go through Celery -
+    see upload_image/upload_image_status."""
+    return process_and_store_image(UPLOAD_DIR, board_id, raw)
 
 
-@app.post("/api/board/{board_id}/upload-image")
+@app.post("/api/board/{board_id}/upload-image", status_code=202)
 async def upload_image(
     board_id: str, file: UploadFile = File(...), user: UserContext = Depends(authenticate_request)
 ):
+    """
+    Compressing/re-encoding an image is CPU-bound and, for large phone photos,
+    can take noticeably longer than users will tolerate blocking on - rather
+    than tie up a request (and an event-loop thread via asyncio.to_thread)
+    for it, stage the raw upload to disk and hand it off to a Celery worker
+    immediately. The frontend polls upload_image_status with the returned
+    job_id and shows a loading placeholder on the canvas until it resolves.
+    """
     conn = get_db()
     try:
         ensure_user_board_access(conn, board_id, user)
@@ -1272,12 +1257,30 @@ async def upload_image(
     if len(raw) > MAX_UPLOAD_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Image exceeds upload size limit")
 
-    try:
-        url, width, height = await asyncio.to_thread(_process_and_store_image, board_id, raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    pending_path = PENDING_UPLOAD_DIR / f"{uuid.uuid4().hex}.bin"
+    await asyncio.to_thread(pending_path.write_bytes, raw)
 
-    return {"url": url, "width": width, "height": height}
+    task = process_image_task.delay(board_id, str(pending_path))
+    return {"job_id": task.id, "status": "processing"}
+
+
+@app.get("/api/board/{board_id}/upload-image/{job_id}")
+async def upload_image_status(
+    board_id: str, job_id: str, user: UserContext = Depends(authenticate_request)
+):
+    conn = get_db()
+    try:
+        ensure_user_board_access(conn, board_id, user)
+    finally:
+        conn.close()
+
+    result = celery_app.AsyncResult(job_id)
+    if result.state == "SUCCESS":
+        payload = result.result or {}
+        return {"status": "done", **payload}
+    if result.state == "FAILURE":
+        return {"status": "error", "detail": str(result.result or "Image processing failed")}
+    return {"status": "processing"}
 
 
 # --- Miro import -----------------------------------------------------------
@@ -1601,7 +1604,6 @@ async def import_from_miro(board_id: str, body: MiroImportRequest, user: UserCon
         wire_ops = _decorate_ops_for_wire(applied_ops, synthetic_session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": user.user_id}
         await sio.emit("batch_update", payload, room=board_id)
-        await sio.emit("ops", payload, room=board_id)
 
     return {
         "ok": True,
@@ -2475,7 +2477,6 @@ async def update(sid: str, data: Any):
             "redo_available": bool(user_hist["redo"]),
         }
         await sio.emit("batch_update", payload, room=board_id, skip_sid=sid)
-        await sio.emit("ops", payload, room=board_id, skip_sid=sid)
     else:
         await sio.emit(
             "update",
@@ -2495,11 +2496,6 @@ async def update(sid: str, data: Any):
         {"undo_available": bool(user_hist["undo"]), "redo_available": bool(user_hist["redo"])},
         to=sid,
     )
-
-
-@sio.event
-async def ops(sid: str, data: Any):
-    await _process_ops_event(sid, data)
 
 
 @sio.event
@@ -2569,7 +2565,6 @@ async def _process_ops_event(sid: str, data: Any):
     wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
     payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
     await sio.emit("batch_update", payload, room=board_id, skip_sid=sid)
-    await sio.emit("ops", payload, room=board_id, skip_sid=sid)
     await sio.emit(
         "history_state",
         {"undo_available": bool(user_hist["undo"]), "redo_available": bool(user_hist["redo"])},
@@ -2658,7 +2653,6 @@ async def undo(sid: str):
         wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
         await sio.emit("batch_update", payload, room=board_id)
-        await sio.emit("ops", payload, room=board_id)
     else:
         await sio.emit(
             "update",
@@ -2716,7 +2710,6 @@ async def redo(sid: str):
         wire_ops = _decorate_ops_for_wire(applied_ops, session, op_ids)
         payload = {"board_id": board_id, "ops": wire_ops, "updated_at": updated_at, "author": session["user_id"]}
         await sio.emit("batch_update", payload, room=board_id)
-        await sio.emit("ops", payload, room=board_id)
     else:
         await sio.emit(
             "update",

@@ -22,9 +22,10 @@ Collaborative infinite whiteboard built with FastAPI, Fabric.js and Socket.IO. T
 ## Stack
 
 - Backend: FastAPI
-- Realtime: python-socketio
+- Realtime: python-socketio (Redis-backed for multi-worker scaling)
+- Background jobs: Celery (Redis broker/backend) - image upload compression runs here, off the request path
 - Frontend: Fabric.js + Bootstrap 5
-- Database: SQLite
+- Database: PostgreSQL (falls back to a local SQLite file if `DATABASE_URL` is unset - see Local Run below)
 - Auth: JWT HS256
 
 ## Development
@@ -35,7 +36,7 @@ Collaborative infinite whiteboard built with FastAPI, Fabric.js and Socket.IO. T
 docker compose up --build
 ```
 
-Сервис будет доступен на `http://localhost:8000`.
+Это поднимает `db`, `redis`, `whiteboard` и `celery-worker` (обрабатывает загрузку/сжатие изображений в фоне - см. [Celery](#celery) ниже). Сервис будет доступен на `http://localhost:8000`.
 
 Открыть доску в dev-режиме без JWT:
 
@@ -73,11 +74,17 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Включите debug-режим в `.env` (установите `DEBUG=True`):
+`.env.example` is written for the Docker Compose network (`DATABASE_URL` points at the `db` host, `UPLOAD_DIR=/data/uploads`) - neither resolves outside a container. For a plain `uvicorn` run, edit `.env`:
 
 ```bash
-# пример редактирования:
-# DEBUG=True
+DEBUG=True
+# Falls back to a local SQLite file - drop the postgresql:// URL entirely,
+# or point it at a Postgres instance reachable from your machine.
+DATABASE_URL=app/boards.db
+UPLOAD_DIR=app/uploads
+# Redis is a hard dependency (presence/history/rate-limiting) - point at a
+# reachable instance, e.g. `docker compose up -d redis` for just that service.
+REDIS_URL=redis://localhost:6379/0
 ```
 
 Запустите приложение через `uvicorn`:
@@ -90,10 +97,30 @@ uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000 --env-file .env
 
 - `http://localhost:8000/board/dev-board`
 
+Запустите Celery-воркер в отдельном терминале (см. [Celery](#celery)) - без него загрузка изображений останется в статусе "обрабатывается" навсегда.
+
+## Celery
+
+Загруженные изображения (`POST /api/board/{board_id}/upload-image`) сжимаются не в самом запросе, а в фоне через Celery - эндпоинт сразу возвращает `job_id`, а фронтенд опрашивает `GET /api/board/{board_id}/upload-image/{job_id}` и показывает плейсхолдер-загрузку до готовности.
+
+В Docker Compose воркер (`celery-worker`) запускается автоматически вместе с `docker compose up`/`docker compose -f docker-compose.prod.yml up`. Для локального запуска через `uvicorn` его нужно поднять отдельно, с теми же переменными окружения (`REDIS_URL`, `UPLOAD_DIR`), что и сам сервис:
+
+```bash
+source .venv/bin/activate
+export $(grep -v '^#' .env | xargs)  # or just export REDIS_URL/UPLOAD_DIR manually
+celery -A app.celery_app worker --loglevel=info
+```
+
+(Celery's CLI doesn't read `.env` files itself like uvicorn's `--env-file` does - the variables need to already be in the shell's environment before `celery worker` starts.)
+
+Без запущенного воркера сам сервис продолжит работать, но загрузка любого изображения зависнет в статусе `processing` навсегда - `job_id` просто никогда не будет обработан.
+
 ## Environment
 
 - `JWT_SECRET` — общий секрет для JWT (HS256)
-- `DATABASE_URL` — путь к SQLite базе (например `app/boards.db`)
+- `DATABASE_URL` — строка подключения к PostgreSQL (`postgresql://user:pass@host:5432/db`); если не задана, используется локальный SQLite-файл (`app/boards.db`)
+- `REDIS_URL` — подключение к Redis (обязателен: presence, история undo/redo, rate-limiting, межпроцессный Socket.IO)
+- `UPLOAD_DIR` — каталог для загруженных изображений (по умолчанию `app/uploads`)
 - `CORS_ORIGINS` — список origin через запятую
 - `DEBUG` — dev-режим; при `True` JWT не обязателен
 

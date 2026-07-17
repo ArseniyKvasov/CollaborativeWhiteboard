@@ -17,20 +17,28 @@
   const shapeToolBtn = document.getElementById("shapeTool");
   const textToolBtn = document.getElementById("textTool");
   const imageToolBtn = document.getElementById("imageTool");
-  const mobileImageBtn = document.getElementById("mobileImageBtn");
-  const selectionLockBtn = document.getElementById("selectionLockBtn");
+  const stickerToolBtn = document.getElementById("stickerTool");
   const undoBtn = document.getElementById("undoBtn");
   const redoBtn = document.getElementById("redoBtn");
   const undoRedoDock = document.getElementById("undoRedoDock");
-  const rotateBtn = document.getElementById("rotateBtn");
-  const mobileRotateBtn = document.getElementById("mobileRotateBtn");
   const clearBtn = document.getElementById("clearBtn");
-  const mobileClearBtn = document.getElementById("mobileClearBtn");
   const bgBtn = document.getElementById("bgBtn");
   const miroImportBtn = document.getElementById("miroImportBtn");
-  const mobileBgBtn = document.getElementById("mobileBgBtn");
-  const mobileMoreBtn = document.getElementById("mobileMoreBtn");
   const hiddenImageInput = document.getElementById("hiddenImageInput");
+  const modalOverlay = document.getElementById("modalOverlay");
+  const confirmModal = document.getElementById("confirmModal");
+  const confirmModalTitle = document.getElementById("confirmModalTitle");
+  const confirmModalBody = document.getElementById("confirmModalBody");
+  const confirmModalOk = document.getElementById("confirmModalOk");
+  const confirmModalCancel = document.getElementById("confirmModalCancel");
+  const miroModal = document.getElementById("miroModal");
+  const miroBoardUrlInput = document.getElementById("miroBoardUrlInput");
+  const miroTokenInput = document.getElementById("miroTokenInput");
+  const miroRememberToken = document.getElementById("miroRememberToken");
+  const miroModalStatus = document.getElementById("miroModalStatus");
+  const miroModalOk = document.getElementById("miroModalOk");
+  const miroModalOkLabel = document.getElementById("miroModalOkLabel");
+  const miroModalCancel = document.getElementById("miroModalCancel");
   const boardNoticeEl = document.getElementById("boardNotice");
 
   const pencilPanel = document.getElementById("pencilPanel");
@@ -41,26 +49,40 @@
   const customColorHueCursor = document.getElementById("customColorHueCursor");
   const textPanel = document.getElementById("textPanel");
   const shapePanel = document.getElementById("shapePanel");
-  const stylePanel = document.getElementById("stylePanel");
-  const mobileMorePanel = document.getElementById("mobileMorePanel");
   const palette = document.getElementById("palette");
 
   const strokeWidthEl = document.getElementById("strokeWidth");
   const textSizeEl = document.getElementById("textSize");
   const cornerRadiusEl = document.getElementById("cornerRadius");
   const selectionPalette = document.getElementById("selectionPalette");
-  const selectionColorRow = document.getElementById("selectionColorRow");
+  const selectionFillPalette = document.getElementById("selectionFillPalette");
   const selectionStrokeWidthEl = document.getElementById("selectionStrokeWidth");
-  const selectionStrokeWidthRow = document.getElementById("selectionStrokeWidthRow");
-  const cornerRadiusRow = document.getElementById("cornerRadiusRow");
-  const deleteSelectionBtn = document.getElementById("deleteSelectionBtn");
   const stickerEditOverlay = document.getElementById("stickerEditOverlay");
+
+  // Mini contextual toolbar (floats above the selection) and its popovers.
+  const selectionToolbar = document.getElementById("selectionToolbar");
+  const selColorBtn = document.getElementById("selColorBtn");
+  const selColorDot = document.getElementById("selColorDot");
+  const selFillBtn = document.getElementById("selFillBtn");
+  const selStrokeBtn = document.getElementById("selStrokeBtn");
+  const selCornerBtn = document.getElementById("selCornerBtn");
+  const selLockBtn = document.getElementById("selLockBtn");
+  const selLockIcon = document.getElementById("selLockIcon");
+  const selRotateBtn = document.getElementById("selRotateBtn");
+  const selDeleteBtn = document.getElementById("selDeleteBtn");
+  const selDeleteSep = document.getElementById("selDeleteSep");
+  const selColorPopover = document.getElementById("selColorPopover");
+  const selFillPopover = document.getElementById("selFillPopover");
+  const selStrokePopover = document.getElementById("selStrokePopover");
+  const selCornerPopover = document.getElementById("selCornerPopover");
 
   const zoomOutBtn = document.getElementById("zoomOutBtn");
   const zoomInBtn = document.getElementById("zoomInBtn");
   const zoomCenterBtn = document.getElementById("zoomCenterBtn");
   const miniMapEl = document.getElementById("miniMap");
   const miniCtx = miniMapEl.getContext("2d");
+  const miniWrap = document.getElementById("miniWrap");
+  const miniCollapseBtn = document.getElementById("miniCollapseBtn");
 
   if (!boardWrap || !canvasEl || !miniMapEl || !miniCtx) {
     console.error("Whiteboard init failed: required DOM nodes are missing.");
@@ -72,12 +94,13 @@
   const STICKER_DEFAULT_W = 200;
   const STICKER_DEFAULT_H = 160;
   const STICKER_MIN_SIZE = 100;
-  const cursorColors = ["#0d6efd", "#7c3aed", "#dc2626", "#0f766e", "#ea580c", "#9333ea", "#1d4ed8", "#0891b2"];
+  const STICKER_DEFAULT_FONT_SIZE = 18;
+  const STICKER_MIN_FONT_SIZE = 10;
+  const cursorColors = ["#e5484d", "#2563eb", "#0d9488", "#ea580c", "#0891b2", "#c026d3", "#b8790a", "#7c3aed"];
   const GRID_WORLD_SIZE = 24;
-  const GRID_BG_IMAGE =
-    "linear-gradient(90deg, rgba(17,24,39,0.045) 1px, transparent 1px), linear-gradient(rgba(17,24,39,0.045) 1px, transparent 1px)";
-  const LOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/lock-outline.svg\')"></span>';
-  const UNLOCK_ICON_HTML = '<span class="bi-local" style="--icon:url(\'/static/icons/unlock-outline.svg\')"></span>';
+  // Dot grid (not lines) - reads as lighter/more premium at a glance, matches
+  // the default background painted by CSS on #boardWrap before any JS runs.
+  const GRID_BG_IMAGE = "radial-gradient(circle, rgba(13,58,33,0.15) 1.1px, transparent 1.6px)";
   const MAX_IMAGE_IMPORT_SIDE = 2400;
   const TARGET_IMAGE_BYTES = 2 * 1024 * 1024;
   const MAX_BOARD_BYTES = 30 * 1024 * 1024;
@@ -133,7 +156,6 @@
   let skipNextTextCreate = false;
   let textEditArmedObjId = "";
   let focusedLockedObject = null;
-  let lockButtonAnchorKey = "";
 
   let lastCursorSentAt = 0;
   const remoteCursors = new Map();
@@ -141,6 +163,13 @@
   const activeTouchPointers = new Map();
   const customColorState = { h: 217, s: 0.44, v: 0.22 };
   let customColorDragMode = "";
+  let stickerMeasureProbe = null;
+  // The gradient SV/hue picker panel is a single shared DOM instance used
+  // from two places: the toolbar's pencil-color trigger (mode "pencil",
+  // changes the global drawing color) and the mini selection-toolbar's
+  // color trigger (mode "selection", recolors the current selection without
+  // touching the pencil color). This flag decides which one a drag updates.
+  let customColorMode = "pencil";
 
   let miniState = {
     minX: 0,
@@ -264,16 +293,16 @@
   fabricCanvas.uniformScaling = false;
 
   function setupObjectStyles() {
-    fabricCanvas.selectionColor = "rgba(13,110,253,0.04)";
-    fabricCanvas.selectionBorderColor = "#0d6efd";
+    fabricCanvas.selectionColor = "rgba(22,163,74,0.08)";
+    fabricCanvas.selectionBorderColor = "#16a34a";
     fabricCanvas.selectionLineWidth = 1.5;
 
     fabric.Object.prototype.set({
-      borderColor: "#0d6efd",
+      borderColor: "#16a34a",
       borderScaleFactor: 1.5,
       borderDashArray: null,
       cornerColor: "#ffffff",
-      cornerStrokeColor: "#0d6efd",
+      cornerStrokeColor: "#16a34a",
       transparentCorners: false,
       cornerStyle: "rect",
       cornerSize: 10,
@@ -300,10 +329,12 @@
     });
   }
 
+  // Rotation now lives only on the mini selection toolbar (selRotateBtn),
+  // whose visibility already tracks the active selection via
+  // updateSelectionToolbar() - kept as a thin alias so the many existing
+  // call sites (selection change, tool switch, etc.) don't need touching.
   function updateRotateButtonState() {
-    const disabled = !canEdit || !fabricCanvas.getActiveObject();
-    if (rotateBtn) rotateBtn.disabled = disabled;
-    if (mobileRotateBtn) mobileRotateBtn.disabled = disabled;
+    updateSelectionToolbar();
   }
 
   function isObjectLocked(obj) {
@@ -363,7 +394,15 @@
   }
 
   function isUniformScaleObject(obj) {
-    return isNoMirrorObject(obj);
+    // Stickers aren't a "no mirror" object (that's about text/images looking
+    // wrong flipped), but a sticker's scaleX/scaleY must stay locked together
+    // too - it's a Group, so non-uniform scaling stretches the text child
+    // horizontally or vertically instead of just resizing the note, which is
+    // exactly the "text randomly compresses" resize bug this guards against.
+    // applySelectionStyles() re-derives lockUniScaling from this check every
+    // time an object is (re)selected, which was silently overriding the
+    // lockUniScaling:true set at sticker creation time.
+    return isNoMirrorObject(obj) || isStickerObject(obj);
   }
 
   function enforceNoMirrorObject(obj) {
@@ -414,44 +453,47 @@
     return enforceNoMirrorObject(target);
   }
 
-  function resolveLockTargetState() {
+  // Any current selection (single object, a grouped object like an arrow or
+  // sticker treated as one unit, a same-type multi-select, or - a locked
+  // object the user just clicked, which Fabric won't actually "select" since
+  // locked objects have selectable:false but the app still wants to offer an
+  // unlock affordance for it).
+  function resolveSelectionAnchor() {
     const active = fabricCanvas.getActiveObject();
-    const selectedObjects = active ? getSelectionObjects() : [];
-    if (active && selectedObjects.length && selectedObjects.every((obj) => isLockEligibleObject(obj))) {
-      return {
-        objects: selectedObjects,
-        anchor: active,
-      };
+    if (active) {
+      return { objects: getPanelSelectionObjects(), anchor: active };
     }
-
-    if (
-      focusedLockedObject
-      && isObjectOnCanvas(focusedLockedObject)
-      && isObjectLocked(focusedLockedObject)
-      && isLockEligibleObject(focusedLockedObject)
-    ) {
-      return {
-        objects: [focusedLockedObject],
-        anchor: focusedLockedObject,
-      };
+    if (focusedLockedObject && isObjectOnCanvas(focusedLockedObject) && isObjectLocked(focusedLockedObject)) {
+      return { objects: [focusedLockedObject], anchor: focusedLockedObject };
     }
-
     return { objects: [], anchor: null };
   }
 
-  function placeSelectionLockButton(anchor) {
-    if (!selectionLockBtn || !anchor || typeof anchor.getBoundingRect !== "function") return false;
+  // Positions `el` centered above `anchor`'s bounding box in page coordinates,
+  // flipping to below the object if there isn't room above, and clamping to
+  // stay fully on-screen. Shared by the selection mini-toolbar; same math the
+  // old standalone lock button used.
+  function placeAboveAnchor(el, anchor, gapPx = 10) {
+    if (!el || !anchor || typeof anchor.getBoundingRect !== "function") return false;
     if (typeof anchor.isOnScreen === "function" && !anchor.isOnScreen()) return false;
     if (typeof anchor.setCoords === "function") anchor.setCoords();
     const bounds = anchor.getBoundingRect();
     if (!bounds) return false;
     const bw = Number(bounds.width || 0);
     const bh = Number(bounds.height || 0);
+    // getBoundingRect() returns scene/world coordinates, not screen pixels -
+    // comparing them directly against canvas width/height (as the original
+    // lock-button code did) only happened to work when the viewport pan was
+    // (0,0); with the default centered pan (resetView sets it to half the
+    // canvas size) it rejected on-screen objects. Convert corners through the
+    // viewport transform before checking.
+    const screenTopLeft = screenFromWorld(bounds.left, bounds.top);
+    const screenBottomRight = screenFromWorld(bounds.left + bw, bounds.top + bh);
     const intersectsCanvas =
-      bounds.left + bw >= 0
-      && bounds.top + bh >= 0
-      && bounds.left <= fabricCanvas.getWidth()
-      && bounds.top <= fabricCanvas.getHeight();
+      Math.max(screenTopLeft.x, screenBottomRight.x) >= 0
+      && Math.max(screenTopLeft.y, screenBottomRight.y) >= 0
+      && Math.min(screenTopLeft.x, screenBottomRight.x) <= fabricCanvas.getWidth()
+      && Math.min(screenTopLeft.y, screenBottomRight.y) <= fabricCanvas.getHeight();
     if (!intersectsCanvas) return false;
     let worldX = bounds.left + bw / 2;
     let worldY = bounds.top;
@@ -478,45 +520,146 @@
     const canvasRect = canvasEl.getBoundingClientRect();
     const topCenter = screenFromWorld(worldX, worldY);
     const absX = canvasRect.left + topCenter.x;
-    const absY = canvasRect.top + topCenter.y;
-    const btnW = selectionLockBtn.offsetWidth || 38;
-    const btnH = selectionLockBtn.offsetHeight || 38;
-    const margin = 10;
-    const left = absX - btnW / 2;
-    const top = absY - btnH - margin;
-    selectionLockBtn.style.left = `${left}px`;
-    selectionLockBtn.style.top = `${top}px`;
+    const absTop = canvasRect.top + topCenter.y;
+    const elW = el.offsetWidth || 160;
+    const elH = el.offsetHeight || 36;
+
+    let top = absTop - elH - gapPx;
+    if (top < 8) {
+      const bottomCenter = screenFromWorld(worldX, bounds.top + bh);
+      top = canvasRect.top + bottomCenter.y + gapPx;
+    }
+    top = Math.max(8, Math.min(window.innerHeight - elH - 8, top));
+    const left = Math.max(8, Math.min(window.innerWidth - elW - 8, absX - elW / 2));
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
     return true;
   }
 
-  function updateLockButtonsState() {
-    const selectMode = canEdit && currentTool === "select";
-    const { objects: selectedObjects, anchor } = resolveLockTargetState();
-    const hasSingleObject = selectedObjects.length === 1;
-    const allLocked = hasSingleObject && selectedObjects.every((obj) => isObjectLocked(obj));
-    const title = allLocked ? "Разблокировать выделение" : "Блокировать выделение";
-    if (selectionLockBtn) {
-      let shouldShow = selectMode && hasSingleObject;
-      selectionLockBtn.disabled = !shouldShow;
-      selectionLockBtn.title = title;
-      selectionLockBtn.classList.toggle("active", allLocked);
-      selectionLockBtn.innerHTML = allLocked ? LOCK_ICON_HTML : UNLOCK_ICON_HTML;
-      if (selectMode && hasSingleObject && anchor) {
-        const only = selectedObjects[0];
-        const fallbackIndex = fabricCanvas.getObjects().indexOf(only);
-        const nextAnchorKey = String(only?.obj_id || only?.id || `idx:${fallbackIndex}`);
-        shouldShow = placeSelectionLockButton(anchor);
-        lockButtonAnchorKey = nextAnchorKey;
-      } else {
-        lockButtonAnchorKey = "";
-      }
-      selectionLockBtn.style.display = shouldShow ? "inline-flex" : "none";
+  function setSelBtnVisible(btn, visible) {
+    if (btn) btn.disabled = !visible;
+  }
+
+  // Tracks whichever sel-popover is currently open and the button it's
+  // anchored to, so repositionOpenSelPopovers() (called every time the
+  // mini-toolbar itself moves - pan, zoom, selection change) can keep it
+  // glued to that button instead of it staying put in screen space while
+  // the object/toolbar it belongs to moves out from under it.
+  let activeSelPopover = null;
+
+  function closeSelPopovers() {
+    [selColorPopover, selFillPopover, selStrokePopover, selCornerPopover].forEach((p) => p && p.classList.remove("active"));
+    activeSelPopover = null;
+    // The gradient color picker is a shared panel (see customColorMode) - if
+    // it's currently showing the selection's color, closing the mini
+    // toolbar's popovers should close it too instead of leaving it orphaned
+    // above a selection that no longer has a toolbar under it.
+    if (customColorPanel && (customColorMode === "selection" || customColorMode === "selectionFill")) {
+      customColorPanel.classList.remove("active");
     }
   }
 
+  function toggleSelPopover(popoverEl, triggerBtn) {
+    if (!popoverEl || !triggerBtn) return;
+    const isOpen = popoverEl.classList.contains("active");
+    closeSelPopovers();
+    if (!isOpen) {
+      popoverEl.classList.add("active");
+      placePanelNear(popoverEl, triggerBtn);
+      activeSelPopover = { popover: popoverEl, trigger: triggerBtn };
+    }
+  }
+
+  // Re-anchors whatever sel-popover (or the shared customColorPanel, when
+  // it's the mini-toolbar's own color/fill trigger that opened it) is
+  // currently open - called alongside placeAboveAnchor(selectionToolbar, ...)
+  // so these follow the object exactly like the mini-toolbar itself does,
+  // instead of staying fixed in screen space while the canvas pans under them.
+  function repositionOpenSelPopovers() {
+    if (activeSelPopover && activeSelPopover.popover.classList.contains("active")) {
+      placePanelNear(activeSelPopover.popover, activeSelPopover.trigger);
+    }
+    if (customColorPanel && customColorPanel.classList.contains("active")) {
+      if (customColorMode === "selection" && selColorBtn) {
+        placeCustomColorPanelUnder(selColorBtn);
+      } else if (customColorMode === "selectionFill" && selFillBtn) {
+        placeCustomColorPanelUnder(selFillBtn);
+      }
+    }
+  }
+
+  function updateSelectionToolbar() {
+    const selectMode = canEdit && currentTool === "select";
+    const { objects, anchor } = resolveSelectionAnchor();
+
+    if (!selectionToolbar) return;
+    if (!selectMode || !objects.length || !anchor) {
+      selectionToolbar.classList.remove("active");
+      closeSelPopovers();
+      updateUndoRedoDockVisibility();
+      return;
+    }
+
+    const colorObjs = objects.filter(hasColorSupport);
+    const fillObjs = objects.filter(isFillableShapeObject);
+    const strokeObjs = objects.filter(hasStrokeWidthSupport);
+    const cornerObjs = objects.filter((o) => isCornerRadiusSupportedObject(o));
+    const lockEligible = objects.every((o) => isLockEligibleObject(o));
+    const allLocked = lockEligible && objects.every((o) => isObjectLocked(o));
+    // Rotation needs a real Fabric active object/selection to call .rotate()
+    // on - a "focused locked object" anchor (see resolveSelectionAnchor) is
+    // just a stand-in for showing the unlock affordance and isn't actually
+    // selected in Fabric, so rotating it isn't possible until unlocked.
+    const rotateEligible = anchor === fabricCanvas.getActiveObject();
+
+    setSelBtnVisible(selColorBtn, colorObjs.length > 0);
+    setSelBtnVisible(selFillBtn, fillObjs.length > 0);
+    setSelBtnVisible(selStrokeBtn, strokeObjs.length > 0);
+    setSelBtnVisible(selCornerBtn, cornerObjs.length > 0);
+    setSelBtnVisible(selLockBtn, lockEligible);
+    setSelBtnVisible(selRotateBtn, rotateEligible);
+    const hasLeadingIcon = colorObjs.length || fillObjs.length || strokeObjs.length || cornerObjs.length || lockEligible || rotateEligible;
+    if (selDeleteSep) selDeleteSep.classList.toggle("is-hidden", !hasLeadingIcon);
+
+    if (colorObjs.length) {
+      const color = getObjectDisplayColor(colorObjs[0]);
+      if (selColorDot) selColorDot.style.background = color;
+      buildSelectionPalette(color);
+    }
+    if (fillObjs.length) {
+      const fill = getObjectFillValue(fillObjs[0]);
+      if (selFillBtn) selFillBtn.classList.toggle("active", !!fill);
+      buildSelectionFillPalette(fill);
+    }
+    if (strokeObjs.length && selectionStrokeWidthEl) {
+      const avg = strokeObjs.reduce((acc, o) => acc + getObjectStrokeWidthValue(o), 0) / strokeObjs.length;
+      selectionStrokeWidthEl.value = String(Math.round(avg));
+    }
+    if (cornerObjs.length && cornerRadiusEl) {
+      const avg = cornerObjs.reduce((acc, o) => acc + getObjectCornerRadius(o), 0) / cornerObjs.length;
+      cornerRadiusEl.value = String(Math.round(avg));
+    }
+    if (selLockBtn) {
+      selLockBtn.classList.toggle("active", allLocked);
+      selLockBtn.title = allLocked ? "Разблокировать" : "Заблокировать";
+      if (selLockIcon) {
+        selLockIcon.style.setProperty("--icon", `url('/static/icons/${allLocked ? "lock" : "unlock"}-outline.svg')`);
+      }
+    }
+
+    const shown = placeAboveAnchor(selectionToolbar, anchor);
+    selectionToolbar.classList.toggle("active", shown);
+    if (!shown) {
+      closeSelPopovers();
+    } else {
+      repositionOpenSelPopovers();
+    }
+    updateUndoRedoDockVisibility();
+  }
+
   function toggleSelectionLock() {
-    const selectedObjects = resolveLockTargetState().objects;
-    if (!canEdit || selectedObjects.length !== 1 || !isLockEligibleObject(selectedObjects[0])) return;
+    const selectedObjects = resolveSelectionAnchor().objects;
+    if (!canEdit || !selectedObjects.length || !selectedObjects.every((obj) => isLockEligibleObject(obj))) return;
     const allLocked = selectedObjects.every((obj) => isObjectLocked(obj));
     const nextLocked = !allLocked;
     selectedObjects.forEach((obj) => {
@@ -535,24 +678,39 @@
     }
     syncObjectInteractivity();
     updateStylePanelVisibility();
-    updateLockButtonsState();
+    updateSelectionToolbar();
     fabricCanvas.requestRenderAll();
   }
 
   function applyEditPermissions() {
+    // A read-only viewer has no use for drawing tools at all - hiding them
+    // outright reads as "this board isn't yours to draw on" much more
+    // clearly than a row of greyed-out buttons that look like a loading
+    // glitch. Select/hand stay visible since viewers can still pan/inspect.
     document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
       const t = btn.dataset.tool;
-      btn.disabled = !canEdit && t !== "select" && t !== "hand";
+      const isDrawingTool = t !== "select" && t !== "hand";
+      btn.style.display = !canEdit && isDrawingTool ? "none" : "";
     });
-    imageToolBtn.disabled = !canEdit;
-    if (mobileImageBtn) mobileImageBtn.disabled = !canEdit;
-    if (miroImportBtn) miroImportBtn.disabled = !canEdit;
-    if (mobileBgBtn) mobileBgBtn.disabled = false;
+    imageToolBtn.style.display = canEdit ? "" : "none";
+    if (miroImportBtn) miroImportBtn.style.display = canEdit ? "" : "none";
+    // Not a .tool-btn[data-tool] (it has its own click handler that both sets
+    // the shape type and switches tool, rather than the generic per-data-tool
+    // one), so it's excluded from the loop above and needs the same gating
+    // applied explicitly - otherwise it stayed visible while every other
+    // drawing tool was correctly hidden for a read-only viewer.
+    if (stickerToolBtn) stickerToolBtn.style.display = canEdit ? "" : "none";
+    // If permission was revoked while a now-hidden drawing tool was active
+    // (e.g. a live role_update), fall back to select rather than leaving an
+    // invisible tool "active" with no visible button to show for it.
+    if (!canEdit && currentTool !== "select" && currentTool !== "hand") {
+      setTool("select");
+    }
     fabricCanvas.isDrawingMode = canEdit && currentTool === "pencil";
     fabricCanvas.selection = canEdit && currentTool === "select";
     fabricCanvas.skipTargetFind = !(canEdit && (currentTool === "select" || currentTool === "eraser" || currentTool === "text"));
     syncObjectInteractivity();
-    updateLockButtonsState();
+    updateSelectionToolbar();
     updateRotateButtonState();
   }
 
@@ -562,12 +720,10 @@
       boardWrap.style.backgroundImage = GRID_BG_IMAGE;
       boardWrap.style.backgroundColor = "#ffffff";
       bgBtn.innerHTML = '<span class="bi-local" style="--icon:url(\'/static/icons/grid-3x3-gap-fill.svg\')"></span>';
-      if (mobileBgBtn) mobileBgBtn.innerHTML = '<span class="bi-local" style="--icon:url(\'/static/icons/grid-3x3-gap-fill.svg\')"></span>';
     } else {
       boardWrap.style.backgroundImage = "none";
       boardWrap.style.backgroundColor = "#ffffff";
       bgBtn.innerHTML = '<span class="bi-local" style="--icon:url(\'/static/icons/border-all.svg\')"></span>';
-      if (mobileBgBtn) mobileBgBtn.innerHTML = '<span class="bi-local" style="--icon:url(\'/static/icons/border-all.svg\')"></span>';
     }
     updateGridPosition();
   }
@@ -720,6 +876,20 @@
     applyStyleToSelection();
   }
 
+  // Routes a live drag on the shared SV/hue picker to whichever thing opened
+  // it - see customColorMode above.
+  function applyCustomColorPick(hex) {
+    if (customColorMode === "selection") {
+      applySelectionColor(hex);
+      if (selColorDot) selColorDot.style.background = hex;
+    } else if (customColorMode === "selectionFill") {
+      applySelectionFill(hex);
+      if (selFillBtn) selFillBtn.classList.add("active");
+    } else {
+      applyChosenColor(hex, true);
+    }
+  }
+
   function buildPalette() {
     palette.innerHTML = "";
     for (const color of paletteColors) {
@@ -745,11 +915,12 @@
       e.preventDefault();
       e.stopPropagation();
       if (!customColorPanel) return;
-      const isOpen = customColorPanel.classList.contains("active");
+      const isOpen = customColorPanel.classList.contains("active") && customColorMode === "pencil";
       if (isOpen) {
         customColorPanel.classList.remove("active");
         return;
       }
+      customColorMode = "pencil";
       syncCustomColorInputs(currentColor);
       customColorPanel.classList.add("active");
       requestAnimationFrame(() => {
@@ -779,7 +950,6 @@
     if (customColorPanel) customColorPanel.classList.remove("active");
     textPanel.classList.remove("active");
     if (shapePanel) shapePanel.classList.remove("active");
-    if (mobileMorePanel) mobileMorePanel.classList.remove("active");
   }
 
   function placeCustomColorPanelUnder(anchorEl) {
@@ -816,8 +986,16 @@
   function setTool(tool) {
     currentTool = tool;
     document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.tool === currentTool);
+      // Stickers are implemented as currentTool "shape" + currentShapeType
+      // "sticker" internally, but have their own dedicated toolbar button -
+      // without this exception the generic data-tool match would light up
+      // the "Фигуры" button too whenever a sticker is the active tool.
+      const isSticker = btn === shapeToolBtn && currentShapeType === "sticker";
+      btn.classList.toggle("active", !isSticker && btn.dataset.tool === currentTool);
     });
+    if (stickerToolBtn) {
+      stickerToolBtn.classList.toggle("active", currentTool === "shape" && currentShapeType === "sticker");
+    }
 
     fabricCanvas.isDrawingMode = canEdit && currentTool === "pencil";
     fabricCanvas.selection = canEdit && currentTool === "select";
@@ -882,7 +1060,7 @@
     fabricCanvas.discardActiveObject();
     fabricCanvas.requestRenderAll();
     drawMiniMap();
-    updateLockButtonsState();
+    updateSelectionToolbar();
   }
 
   function startPinchWithPoints(p1, p2) {
@@ -947,7 +1125,7 @@
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
-    updateLockButtonsState();
+    updateSelectionToolbar();
   }
 
   function setShapeType(shape) {
@@ -955,7 +1133,11 @@
     document.querySelectorAll(".shape-btn[data-shape]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.shape === currentShapeType);
     });
-    if (shapeToolBtn) {
+    // Sticker lives on its own dedicated toolbar button now (not the shape
+    // dropdown), so it gets its own active-state toggle instead of taking
+    // over the "Фигуры" button's icon.
+    if (stickerToolBtn) stickerToolBtn.classList.toggle("active", currentShapeType === "sticker");
+    if (shapeToolBtn && shape !== "sticker") {
       const shapeIconByType = {
         rect: '<span class="bi-local" style="--icon:url(\'/static/icons/square.svg\')"></span>',
         ellipse: '<span class="bi-local" style="--icon:url(\'/static/icons/circle.svg\')"></span>',
@@ -963,16 +1145,17 @@
         arrow: '<span class="shape-arrow-glyph">↗</span>',
         triangle: '<span class="bi-local" style="--icon:url(\'/static/icons/triangle.svg\')"></span>',
         diamond: '<span class="bi-local" style="--icon:url(\'/static/icons/diamond.svg\')"></span>',
-        sticker: '<span class="bi-local" style="--icon:url(\'/static/icons/sticky-note.svg\')"></span>',
       };
       shapeToolBtn.innerHTML = shapeIconByType[currentShapeType] || shapeIconByType.rect;
     }
   }
 
   function updateUndoRedoDockVisibility() {
+    // The selection mini-toolbar floats above the object itself now (not
+    // fixed bottom-left like the old panel), so it no longer competes for
+    // space with the undo/redo dock - always show it.
     if (!undoRedoDock) return;
-    const hide = !!(stylePanel && stylePanel.classList.contains("active"));
-    undoRedoDock.classList.toggle("is-hidden", hide);
+    undoRedoDock.classList.remove("is-hidden");
   }
 
   function syncObjectInteractivity() {
@@ -994,7 +1177,7 @@
     }
 
     updateRotateButtonState();
-    updateLockButtonsState();
+    updateSelectionToolbar();
     fabricCanvas.requestRenderAll();
   }
 
@@ -1007,13 +1190,13 @@
       active.set({
         hasControls: true,
         hasBorders: true,
-        borderColor: "#0d6efd",
+        borderColor: "#16a34a",
         borderDashArray: [6, 3],
         lockRotation: true,
         cornerStyle: "rect",
         transparentCorners: false,
         cornerColor: "#ffffff",
-        cornerStrokeColor: "#0d6efd",
+        cornerStrokeColor: "#16a34a",
         cornerSize: 10,
         touchCornerSize: 28,
         lockUniScaling: false,
@@ -1024,10 +1207,10 @@
       active.set({
         hasControls: true,
         hasBorders: true,
-        borderColor: "#0d6efd",
+        borderColor: "#16a34a",
         borderDashArray: [6, 3],
         cornerColor: "#ffffff",
-        cornerStrokeColor: "#0d6efd",
+        cornerStrokeColor: "#16a34a",
         transparentCorners: false,
         cornerStyle: "rect",
         cornerSize: 10,
@@ -1078,7 +1261,7 @@
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
-    updateLockButtonsState();
+    updateSelectionToolbar();
   }
 
   function resetView() {
@@ -1092,7 +1275,7 @@
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
-    updateLockButtonsState();
+    updateSelectionToolbar();
   }
 
   function zoomByFactor(factor, centerX, centerY) {
@@ -1106,7 +1289,7 @@
     renderRemoteCursors();
     drawMiniMap();
     updateGridPosition();
-    updateLockButtonsState();
+    updateSelectionToolbar();
   }
 
   function updateGridPosition() {
@@ -1224,6 +1407,11 @@
   // single grouped object (arrow, sticker) - flattening a sticker would expose
   // its internal rect/textbox as if they were independent top-level objects.
   const STROKE_SHAPE_TYPES = new Set(["rect", "ellipse", "triangle", "path", "line", "polyline", "polygon"]);
+  // Only the closed, "solid" shapes get a fill toggle - a line has no
+  // interior to fill, and diamond is implemented as a plain "polygon" (the
+  // only top-level polygon shape in the app, since the arrow's triangle head
+  // lives inside a group and isn't independently selectable).
+  const FILLABLE_SHAPE_TYPES = new Set(["rect", "ellipse", "triangle", "polygon"]);
 
   function isActiveSelectionObject(obj) {
     return !!(obj && typeof obj.type === "string" && obj.type.toLowerCase() === "activeselection");
@@ -1259,6 +1447,64 @@
   // group/subtarget editing internals, overlay a plain HTML <textarea> on top
   // of the sticker (positioned via the same screen-space conversion already
   // used for the selection lock button) and write the result back on exit.
+  // Shrinks the overlay's font size (down to STICKER_MIN_FONT_SIZE, scaled
+  // for the current zoom/sticker size) until the typed text stops
+  // overflowing the box, and grows it back toward the sticker's normal size
+  // as text is deleted - the same "auto-fit while typing" behavior Miro uses
+  // for sticky notes, rather than letting text overflow or wrap-clip.
+  // Measures wrapped text height off-screen, independent of the live
+  // overlay's own padding/height - letting the overlay's padding itself be
+  // the thing we solve for (see fitStickerOverlayFont) without a feedback
+  // loop from mutating the element we're also measuring.
+  function measureStickerTextHeight(text, fontPx, widthPx) {
+    if (!stickerMeasureProbe) {
+      stickerMeasureProbe = document.createElement("div");
+      stickerMeasureProbe.style.position = "fixed";
+      stickerMeasureProbe.style.visibility = "hidden";
+      stickerMeasureProbe.style.left = "-9999px";
+      stickerMeasureProbe.style.top = "0";
+      stickerMeasureProbe.style.whiteSpace = "pre-wrap";
+      stickerMeasureProbe.style.wordBreak = "break-word";
+      stickerMeasureProbe.style.fontFamily = "'Montserrat', 'Segoe UI', sans-serif";
+      stickerMeasureProbe.style.fontWeight = "500";
+      stickerMeasureProbe.style.lineHeight = "1.3";
+      document.body.appendChild(stickerMeasureProbe);
+    }
+    stickerMeasureProbe.style.width = `${Math.max(1, widthPx)}px`;
+    stickerMeasureProbe.style.fontSize = `${fontPx}px`;
+    stickerMeasureProbe.textContent = text.length ? text : " ";
+    return stickerMeasureProbe.scrollHeight;
+  }
+
+  function fitStickerOverlayFont() {
+    if (!stickerEditOverlay || stickerEditOverlay.style.display === "none") return;
+    const displayScale = Number(stickerEditOverlay.dataset.displayScale) || 1;
+    const maxFontPx = STICKER_DEFAULT_FONT_SIZE * displayScale;
+    const minFontPx = STICKER_MIN_FONT_SIZE * displayScale;
+    const pad = 14; // matches #stickerEditOverlay's own CSS padding
+    const boxW = stickerEditOverlay.clientWidth;
+    const boxH = stickerEditOverlay.clientHeight;
+    const contentW = Math.max(1, boxW - pad * 2);
+    const text = stickerEditOverlay.value;
+
+    let fontPx = maxFontPx;
+    let contentH = measureStickerTextHeight(text, fontPx, contentW);
+    while (fontPx > minFontPx && contentH + pad * 2 > boxH) {
+      fontPx -= 1;
+      contentH = measureStickerTextHeight(text, fontPx, contentW);
+    }
+    stickerEditOverlay.style.fontSize = `${fontPx}px`;
+
+    // Vertically center by splitting whatever room is left over (after the
+    // fitted text and its fixed side padding) evenly above and below -
+    // horizontal centering is a plain CSS text-align, but there's no CSS
+    // equivalent for a <textarea>'s own vertical text position.
+    const extra = Math.max(0, boxH - pad * 2 - contentH);
+    const topPad = pad + extra / 2;
+    stickerEditOverlay.style.paddingTop = `${topPad}px`;
+    stickerEditOverlay.style.paddingBottom = `${topPad}px`;
+  }
+
   function enterStickerEditMode(group) {
     if (!stickerEditOverlay || !canEdit) return;
     const textChild = getStickerTextChild(group);
@@ -1268,19 +1514,31 @@
     const bounds = group.getBoundingRect();
     const canvasRect = canvasEl.getBoundingClientRect();
     const topLeft = screenFromWorld(bounds.left, bounds.top);
+    const bottomRight = screenFromWorld(bounds.left + bounds.width, bounds.top + bounds.height);
+    // getBoundingRect() bakes the group's own scaleX/scaleY into its width/
+    // height already, but not the viewport zoom - convert both corners
+    // through the viewport transform so the overlay box (and the font-size
+    // below) match what's actually rendered on screen at any zoom level.
     const zoom = fabricCanvas.getZoom();
+    const displayScale = (Number(group.scaleX) || 1) * zoom;
 
+    const rectChild = getStickerRectChild(group);
     stickerEditOverlay.value = textChild.text || "";
     stickerEditOverlay.style.left = `${canvasRect.left + topLeft.x}px`;
     stickerEditOverlay.style.top = `${canvasRect.top + topLeft.y}px`;
-    stickerEditOverlay.style.width = `${bounds.width}px`;
-    stickerEditOverlay.style.height = `${bounds.height}px`;
-    stickerEditOverlay.style.fontSize = `${(Number(textChild.fontSize) || 18) * zoom}px`;
+    stickerEditOverlay.style.width = `${bottomRight.x - topLeft.x}px`;
+    stickerEditOverlay.style.height = `${bottomRight.y - topLeft.y}px`;
+    stickerEditOverlay.dataset.displayScale = String(displayScale);
+    // Match the sticker's own fill so the editing textarea reads as "the
+    // sticker itself, now editable" rather than a generic input box floating
+    // over a gap where the note briefly disappeared.
+    stickerEditOverlay.style.background = (rectChild && rectChild.fill) || "#fef08a";
     stickerEditOverlay.style.display = "block";
     stickerEditOverlay.dataset.targetObjId = group.obj_id || "";
 
     group.set({ opacity: 0 });
     fabricCanvas.requestRenderAll();
+    fitStickerOverlayFont();
     requestAnimationFrame(() => {
       stickerEditOverlay.focus();
       stickerEditOverlay.select();
@@ -1291,6 +1549,8 @@
     if (!stickerEditOverlay || stickerEditOverlay.style.display === "none") return;
     const objId = stickerEditOverlay.dataset.targetObjId || "";
     const value = stickerEditOverlay.value;
+    const displayScale = Number(stickerEditOverlay.dataset.displayScale) || 1;
+    const fittedFontPx = parseFloat(stickerEditOverlay.style.fontSize) || (STICKER_DEFAULT_FONT_SIZE * displayScale);
     stickerEditOverlay.style.display = "none";
     stickerEditOverlay.dataset.targetObjId = "";
 
@@ -1299,11 +1559,19 @@
     group.set({ opacity: 1 });
     if (commit) {
       const textChild = getStickerTextChild(group);
-      if (textChild && textChild.text !== value) {
-        textChild.set({ text: value });
-        if (typeof textChild.initDimensions === "function") textChild.initDimensions();
-        group.dirty = true;
-        enqueueUpdateOp(group);
+      if (textChild) {
+        // Store the font size back in the sticker's own (unscaled, un-zoomed)
+        // units so it renders at the same visual size next time, regardless
+        // of the zoom level or group scale in effect while editing.
+        const nextFontSize = Math.max(STICKER_MIN_FONT_SIZE, fittedFontPx / displayScale);
+        const textChanged = textChild.text !== value;
+        const fontChanged = Math.abs((Number(textChild.fontSize) || 0) - nextFontSize) > 0.5;
+        if (textChanged || fontChanged) {
+          textChild.set({ text: value, fontSize: nextFontSize });
+          if (typeof textChild.initDimensions === "function") textChild.initDimensions();
+          group.dirty = true;
+          enqueueUpdateOp(group);
+        }
       }
     }
     fabricCanvas.requestRenderAll();
@@ -1372,6 +1640,22 @@
     return true;
   }
 
+  function isFillableShapeObject(obj) {
+    return !!obj && FILLABLE_SHAPE_TYPES.has(obj.type);
+  }
+
+  function getObjectFillValue(obj) {
+    if (!isFillableShapeObject(obj)) return null;
+    const fill = obj.fill;
+    return fill && fill !== "transparent" ? fill : null;
+  }
+
+  function applyFillToObject(obj, color) {
+    if (!isFillableShapeObject(obj)) return false;
+    obj.set({ fill: color || "transparent" });
+    return true;
+  }
+
   function applyStrokeWidthToObject(obj, width) {
     if (!hasStrokeWidthSupport(obj)) return false;
     if (isArrowGroupObject(obj) && typeof obj.getObjects === "function") {
@@ -1397,6 +1681,18 @@
     let changed = false;
     objs.forEach((obj) => {
       if (applyColorToObject(obj, color)) changed = true;
+    });
+    if (!changed) return;
+    fabricCanvas.requestRenderAll();
+    enqueuePanelSelectionUpdates(objs);
+    updateStylePanelVisibility();
+  }
+
+  function applySelectionFill(color) {
+    const objs = getPanelSelectionObjects().filter(isFillableShapeObject);
+    let changed = false;
+    objs.forEach((obj) => {
+      if (applyFillToObject(obj, color)) changed = true;
     });
     if (!changed) return;
     fabricCanvas.requestRenderAll();
@@ -1435,61 +1731,102 @@
     }
 
     const usingCustom = !colors.includes(activeColor);
-    const customInput = document.createElement("input");
-    customInput.type = "color";
-    customInput.className = `swatch${usingCustom ? " active" : ""}`;
-    customInput.title = "Свой цвет";
-    customInput.style.padding = "0";
-    customInput.style.border = usingCustom ? "2px solid #0d6efd" : "2px solid transparent";
-    customInput.value = /^#[0-9a-fA-F]{6}$/.test(activeColor) ? activeColor : "#000000";
-    customInput.addEventListener("input", () => applySelectionColor(customInput.value));
-    selectionPalette.appendChild(customInput);
+    const customBtn = document.createElement("button");
+    customBtn.className = `swatch swatch-custom-trigger${usingCustom ? " active" : ""}`;
+    customBtn.type = "button";
+    customBtn.setAttribute("aria-label", "Открыть расширенную палитру");
+    customBtn.title = "Выбрать свой цвет";
+    customBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!customColorPanel) return;
+      const isOpen = customColorPanel.classList.contains("active") && customColorMode === "selection";
+      if (isOpen) {
+        customColorPanel.classList.remove("active");
+        return;
+      }
+      customColorMode = "selection";
+      syncCustomColorInputs(activeColor);
+      customColorPanel.classList.add("active");
+      requestAnimationFrame(() => {
+        placeCustomColorPanelUnder(customBtn);
+        renderCustomColorPicker();
+      });
+    });
+    selectionPalette.appendChild(customBtn);
   }
 
+  function buildSelectionFillPalette(activeFill) {
+    if (!selectionFillPalette) return;
+    selectionFillPalette.innerHTML = "";
+
+    const noneBtn = document.createElement("button");
+    noneBtn.className = `swatch swatch-none${activeFill ? "" : " active"}`;
+    noneBtn.type = "button";
+    noneBtn.title = "Без заливки";
+    noneBtn.addEventListener("click", () => applySelectionFill(null));
+    selectionFillPalette.appendChild(noneBtn);
+
+    for (const color of paletteColors) {
+      const btn = document.createElement("button");
+      btn.className = `swatch${color === activeFill ? " active" : ""}`;
+      btn.style.background = color;
+      btn.type = "button";
+      btn.title = color;
+      btn.addEventListener("click", () => applySelectionFill(color));
+      selectionFillPalette.appendChild(btn);
+    }
+
+    const usingCustom = !!activeFill && !paletteColors.includes(activeFill);
+    const customBtn = document.createElement("button");
+    customBtn.className = `swatch swatch-custom-trigger${usingCustom ? " active" : ""}`;
+    customBtn.type = "button";
+    customBtn.setAttribute("aria-label", "Открыть расширенную палитру");
+    customBtn.title = "Выбрать свой цвет";
+    customBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!customColorPanel) return;
+      const isOpen = customColorPanel.classList.contains("active") && customColorMode === "selectionFill";
+      if (isOpen) {
+        customColorPanel.classList.remove("active");
+        return;
+      }
+      customColorMode = "selectionFill";
+      syncCustomColorInputs(activeFill || paletteColors[0]);
+      customColorPanel.classList.add("active");
+      requestAnimationFrame(() => {
+        placeCustomColorPanelUnder(customBtn);
+        renderCustomColorPicker();
+      });
+    });
+    selectionFillPalette.appendChild(customBtn);
+  }
+
+  // Kept as a thin alias: this used to own the old bottom-left panel and is
+  // still called from many event handlers throughout the file. All of that
+  // logic now lives in updateSelectionToolbar (the mini-toolbar above the
+  // selection), so every one of those call sites gets the new behavior for
+  // free without having to touch each one individually.
   function updateStylePanelVisibility() {
-    if (!stylePanel) return;
-    const objs = getPanelSelectionObjects();
-    if (!objs.length) {
-      stylePanel.classList.remove("active");
-      updateUndoRedoDockVisibility();
-      return;
-    }
-
-    const colorObjs = objs.filter(hasColorSupport);
-    const strokeObjs = objs.filter(hasStrokeWidthSupport);
-    const cornerObjs = objs.filter((o) => isCornerRadiusSupportedObject(o));
-
-    if (selectionColorRow) selectionColorRow.style.display = colorObjs.length ? "" : "none";
-    if (selectionStrokeWidthRow) selectionStrokeWidthRow.style.display = strokeObjs.length ? "" : "none";
-    if (cornerRadiusRow) cornerRadiusRow.style.display = cornerObjs.length ? "" : "none";
-
-    if (colorObjs.length) {
-      buildSelectionPalette(getObjectDisplayColor(colorObjs[0]));
-    }
-    if (strokeObjs.length && selectionStrokeWidthEl) {
-      const avg = strokeObjs.reduce((acc, o) => acc + getObjectStrokeWidthValue(o), 0) / strokeObjs.length;
-      selectionStrokeWidthEl.value = String(Math.round(avg));
-    }
-    if (cornerObjs.length && cornerRadiusEl) {
-      const avg = cornerObjs.reduce((acc, o) => acc + getObjectCornerRadius(o), 0) / cornerObjs.length;
-      cornerRadiusEl.value = String(Math.round(avg));
-    }
-
-    stylePanel.classList.add("active");
-    updateUndoRedoDockVisibility();
+    updateSelectionToolbar();
   }
 
   function applyCornerRadiusToSelection(value) {
     const radius = Number(value);
     if (!Number.isFinite(radius)) return;
-    const objs = getSelectionObjects().filter((o) => isCornerRadiusSupportedObject(o));
+    // Uses resolveSelectionAnchor() rather than the older getSelectionObjects()
+    // so this also works for a locked-but-focused image (which has no true
+    // Fabric selection to flatten) and treats a grouped object as one unit
+    // instead of exploding it into its children.
+    const objs = resolveSelectionAnchor().objects.filter((o) => isCornerRadiusSupportedObject(o));
     if (!objs.length) return;
     objs.forEach((obj) => {
       setObjectCornerRadius(obj, radius);
       obj.setCoords();
     });
     fabricCanvas.requestRenderAll();
-    enqueueSelectionUpdates();
+    enqueuePanelSelectionUpdates(objs);
   }
 
   function applyStyleToSelection() {
@@ -1642,7 +1979,7 @@
     // else's incoming update - the more concurrent editors, the more often it
     // happened. Echoing back a remote-applied object is prevented separately,
     // at the object:added/object:removed handlers below, which never call
-    // into enqueueOps/emitUpdateOpImmediate in the first place.
+    // into enqueueOps in the first place.
     if (!canEdit || suppressBroadcast) return;
     const normalized = (Array.isArray(ops) ? ops : [ops]).filter((op) => op && typeof op === "object");
     if (!normalized.length) return;
@@ -1665,14 +2002,6 @@
   function enqueueUpdateOp(obj) {
     if (!isSyncableObject(obj) || obj._isDraft) return;
     enqueueOps(buildAction("update", { object: serializeObject(obj) }));
-  }
-
-  function emitUpdateOpImmediate(obj, absolute = false) {
-    if (!canEdit || suppressBroadcast) return;
-    if (!isSyncableObject(obj) || obj._isDraft) return;
-    socket.emit("batch_update", {
-      ops: [buildAction("update", { object: absolute ? serializeAbsoluteObject(obj) : serializeObject(obj) })],
-    });
   }
 
   function enqueueRemoveOp(obj) {
@@ -1771,11 +2100,103 @@
     return Array.from(types).includes("Files");
   }
 
-  function showBoardNotice(message) {
+  const MIRO_TOKEN_STORAGE_KEY = "wb_miro_token";
+
+  function closeModal() {
+    if (!modalOverlay) return;
+    modalOverlay.classList.remove("active");
+    if (confirmModal) confirmModal.classList.remove("active");
+    if (miroModal) miroModal.classList.remove("active");
+  }
+
+  function openModalCard(card) {
+    if (!modalOverlay || !card) return;
+    [confirmModal, miroModal].forEach((c) => c && c.classList.remove("active"));
+    card.classList.add("active");
+    modalOverlay.classList.add("active");
+  }
+
+  if (modalOverlay) {
+    modalOverlay.addEventListener("mousedown", (e) => {
+      if (e.target === modalOverlay) closeModal();
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && modalOverlay && modalOverlay.classList.contains("active")) closeModal();
+  });
+
+  // Generic yes/no dialog (currently only used for clearing the board, but
+  // written to take a title/body/label so it isn't a one-off) - replaces
+  // window.confirm with something that matches the app's own chrome instead
+  // of an OS-styled browser dialog.
+  function showConfirmModal({ title, body, confirmLabel = "Удалить" } = {}) {
+    return new Promise((resolve) => {
+      if (!modalOverlay || !confirmModal) {
+        resolve(window.confirm(body || title || "Вы уверены?"));
+        return;
+      }
+      if (confirmModalTitle) confirmModalTitle.textContent = title || "Подтвердите действие";
+      if (confirmModalBody) confirmModalBody.textContent = body || "";
+      if (confirmModalOk) confirmModalOk.textContent = confirmLabel;
+      openModalCard(confirmModal);
+      const cleanup = () => {
+        confirmModalOk.removeEventListener("click", onOk);
+        confirmModalCancel.removeEventListener("click", onCancel);
+      };
+      const onOk = () => {
+        cleanup();
+        closeModal();
+        resolve(true);
+      };
+      const onCancel = () => {
+        cleanup();
+        closeModal();
+        resolve(false);
+      };
+      confirmModalOk.addEventListener("click", onOk);
+      confirmModalCancel.addEventListener("click", onCancel);
+    });
+  }
+
+  // Accepts either a bare board ID or a full board URL (miro.com/app/board/
+  // XXXX=/...) so users don't have to hunt through the URL to pull the ID
+  // out themselves - just paste whatever's in the address bar.
+  function extractMiroBoardId(raw) {
+    const value = String(raw || "").trim();
+    if (!value) return "";
+    const match = value.match(/\/board\/([^/?#]+)/);
+    if (match) return decodeURIComponent(match[1]);
+    return value;
+  }
+
+  function setMiroModalStatus(message, type) {
+    if (!miroModalStatus) return;
+    miroModalStatus.textContent = message || "";
+    miroModalStatus.className = `modal-status${type ? ` is-${type}` : ""}`;
+  }
+
+  function openMiroImportModal() {
+    if (!modalOverlay || !miroModal) return;
+    setMiroModalStatus("");
+    if (miroBoardUrlInput) miroBoardUrlInput.value = "";
+    // The token is remembered per-browser (never sent anywhere but this
+    // board's own import request) so re-importing, or importing a second
+    // board from the same Miro account, doesn't mean digging the token back
+    // out of Miro's settings every time.
+    const savedToken = localStorage.getItem(MIRO_TOKEN_STORAGE_KEY) || "";
+    if (miroTokenInput) miroTokenInput.value = savedToken;
+    if (miroRememberToken) miroRememberToken.checked = true;
+    openModalCard(miroModal);
+    requestAnimationFrame(() => miroBoardUrlInput && miroBoardUrlInput.focus());
+  }
+
+  function showBoardNotice(message, type = "error") {
     const text = String(message || "").trim();
     if (!text) return;
     if (!boardNoticeEl) return;
     boardNoticeEl.textContent = text;
+    boardNoticeEl.classList.remove("is-success", "is-info", "is-warning");
+    if (type !== "error") boardNoticeEl.classList.add(`is-${type}`);
     boardNoticeEl.classList.add("is-visible");
     if (boardNoticeTimer) clearTimeout(boardNoticeTimer);
     boardNoticeTimer = setTimeout(() => {
@@ -1783,11 +2204,11 @@
     }, 2400);
   }
 
-  function showConnectionNotice(message, throttleMs = 2600) {
+  function showConnectionNotice(message, throttleMs = 2600, type = "warning") {
     const now = Date.now();
     if (throttleMs > 0 && now - lastConnectionNoticeAt < throttleMs) return;
     lastConnectionNoticeAt = now;
-    showBoardNotice(message);
+    showBoardNotice(message, type);
   }
 
   function readFileAsDataUrl(file) {
@@ -2161,7 +2582,7 @@
     const h = miniMapEl.height;
 
     miniCtx.clearRect(0, 0, w, h);
-    miniCtx.fillStyle = "#fbfbff";
+    miniCtx.fillStyle = "#f3faf5";
     miniCtx.fillRect(0, 0, w, h);
 
     const objectBounds = [];
@@ -2211,7 +2632,9 @@
 
     const toMini = (x, y) => ({ x: ox + (x - minX) * scale, y: oy + (y - minY) * scale });
 
-    miniCtx.fillStyle = "rgba(124,58,237,0.5)";
+    // Neutral ink tone for content blobs so the green viewport rectangle below
+    // reads as the one highlighted "you are here" element, Miro-style.
+    miniCtx.fillStyle = "rgba(20,36,28,0.32)";
     for (const b of objectBounds) {
       const p1 = toMini(b.minX, b.minY);
       const p2 = toMini(b.maxX, b.maxY);
@@ -2225,9 +2648,9 @@
     const vpW = Math.max(4, v2.x - v1.x);
     const vpH = Math.max(4, v2.y - v1.y);
 
-    miniCtx.fillStyle = "rgba(13,110,253,0.10)";
+    miniCtx.fillStyle = "rgba(22,163,74,0.14)";
     miniCtx.fillRect(vpX, vpY, vpW, vpH);
-    miniCtx.strokeStyle = "#0d6efd";
+    miniCtx.strokeStyle = "#16a34a";
     miniCtx.lineWidth = 1.4;
     miniCtx.strokeRect(vpX, vpY, vpW, vpH);
 
@@ -2277,7 +2700,112 @@
       }
       throw new Error(detail || "image_upload_failed");
     }
+    // The endpoint now returns immediately with a job_id (see main.py's
+    // upload_image) - the actual compression happens on a Celery worker,
+    // polled for via pollImageUploadJob below.
     return res.json();
+  }
+
+  async function pollImageUploadJob(jobId, { intervalMs = 700, timeoutMs = 60000 } = {}) {
+    const headers = {};
+    if (pageToken) headers["Authorization"] = `Bearer ${pageToken}`;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const res = await fetch(
+        `/api/board/${encodeURIComponent(boardId)}/upload-image/${encodeURIComponent(jobId)}`,
+        { headers },
+      );
+      if (!res.ok) throw new Error("image_status_failed");
+      const data = await res.json();
+      if (data.status === "done") return data;
+      if (data.status === "error") throw new Error(data.detail || "image_processing_failed");
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    throw new Error("image_processing_timeout");
+  }
+
+  // Loops a slow opacity pulse on the placeholder rect so "an image is on
+  // its way" reads clearly while the Celery worker compresses it, instead of
+  // the canvas just sitting there with nothing happening for however long
+  // that takes on a large photo.
+  function pulseImagePlaceholder(rect) {
+    if (!rect || !isObjectOnCanvas(rect) || !rect.wb_isImagePlaceholder) return;
+    fabric.util.animate({
+      startValue: 0.35,
+      endValue: 0.75,
+      duration: 550,
+      onChange: (v) => {
+        rect.set({ opacity: v });
+        fabricCanvas.requestRenderAll();
+      },
+      onComplete: () => {
+        if (!isObjectOnCanvas(rect) || !rect.wb_isImagePlaceholder) return;
+        fabric.util.animate({
+          startValue: 0.75,
+          endValue: 0.35,
+          duration: 550,
+          onChange: (v) => {
+            rect.set({ opacity: v });
+            fabricCanvas.requestRenderAll();
+          },
+          onComplete: () => pulseImagePlaceholder(rect),
+        });
+      },
+    });
+  }
+
+  function createImageUploadPlaceholder(worldX, worldY, naturalWidth, naturalHeight) {
+    const maxW = 320;
+    const ratio = naturalWidth && naturalHeight ? naturalHeight / naturalWidth : 0.72;
+    const w = naturalWidth ? Math.min(maxW, naturalWidth) : 220;
+    const h = Math.round(w * ratio);
+    const rect = new fabric.Rect({
+      left: worldX - w / 2,
+      top: worldY - h / 2,
+      width: w,
+      height: h,
+      rx: 12,
+      ry: 12,
+      fill: "rgba(22,163,74,0.10)",
+      stroke: "rgba(22,163,74,0.35)",
+      strokeDashArray: [7, 5],
+      strokeWidth: 1.5,
+      selectable: false,
+      evented: false,
+      excludeFromExport: true,
+      opacity: 0.35,
+    });
+    rect.wb_isImagePlaceholder = true;
+    fabricCanvas.add(rect);
+    fabricCanvas.requestRenderAll();
+    pulseImagePlaceholder(rect);
+    return rect;
+  }
+
+  function removeImageUploadPlaceholder(rect) {
+    if (!rect) return;
+    rect.wb_isImagePlaceholder = false;
+    if (isObjectOnCanvas(rect)) fabricCanvas.remove(rect);
+  }
+
+  // Reads just the pixel dimensions of the picked file, client-side, so the
+  // loading placeholder can be sized to roughly the final image's aspect
+  // ratio instead of a generic box that then jumps/resizes once the real
+  // image comes back.
+  function readImageNaturalSize(file) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve({ width: 0, height: 0 });
+      };
+      img.src = url;
+    });
   }
 
   function addImageAtWorldPoint(dataUrl, worldX, worldY) {
@@ -2311,18 +2839,31 @@
 
   async function addImageFileAtWorldPoint(file, worldX, worldY) {
     if (!isImageFile(file)) throw new Error("unsupported_file_type");
-    // Pre-shrink client-side first: cuts upload time/bandwidth and gives the
-    // backend an already-small image to re-encode (see _process_and_store_image
-    // for why that's processed synchronously rather than via a background job).
-    let dataUrl = "";
+
+    const naturalSize = await readImageNaturalSize(file);
+    const placeholder = createImageUploadPlaceholder(worldX, worldY, naturalSize.width, naturalSize.height);
+
     try {
-      dataUrl = await optimizeImageFile(file);
-    } catch (_) {
-      dataUrl = "";
+      // Pre-shrink client-side first: cuts upload time/bandwidth and gives
+      // the backend an already-small image to re-encode (the backend still
+      // re-encodes to WEBP and enforces the hard size cap - see
+      // app/image_processing.py - this is just an optimization, not what
+      // makes the upload non-blocking; that's the job_id/poll flow below).
+      let dataUrl = "";
+      try {
+        dataUrl = await optimizeImageFile(file);
+      } catch (_) {
+        dataUrl = "";
+      }
+      const uploadBlob = dataUrl ? await dataUrlToBlob(dataUrl) : file;
+      const uploaded = await uploadImageToServer(uploadBlob, file.name);
+      const result = await pollImageUploadJob(uploaded.job_id);
+      removeImageUploadPlaceholder(placeholder);
+      await addImageAtWorldPoint(result.url, worldX, worldY);
+    } catch (err) {
+      removeImageUploadPlaceholder(placeholder);
+      showBoardError(err?.message || "Не удалось добавить изображение");
     }
-    const uploadBlob = dataUrl ? await dataUrlToBlob(dataUrl) : file;
-    const uploaded = await uploadImageToServer(uploadBlob, file.name);
-    await addImageAtWorldPoint(uploaded.url, worldX, worldY);
   }
 
   function worldCenterOfViewport() {
@@ -2330,27 +2871,24 @@
   }
 
   function deleteActiveObjects() {
-    const active = fabricCanvas.getActiveObject();
-    if (!active) return;
     // Bug fix: the old check here treated ANY object with a getObjects()
     // method as a multi-selection, including a single grouped object (arrow,
     // sticker) - it would then try to canvas.remove() the group's own
     // children, which are not top-level canvas objects, so nothing actually
     // happened. Deleting a lone arrow/sticker via Delete/Backspace or this
-    // button silently did nothing before this fix.
-    if (isActiveSelectionObject(active)) {
-      const objects = typeof active.getObjects === "function" ? [...active.getObjects()] : [];
-      fabricCanvas.discardActiveObject();
-      objects.forEach((o) => fabricCanvas.remove(o));
-    } else {
-      fabricCanvas.discardActiveObject();
-      fabricCanvas.remove(active);
-    }
+    // button silently did nothing before this fix. Using
+    // resolveSelectionAnchor() also covers deleting a locked-but-focused
+    // object, which has no true Fabric selection to read.
+    const { objects } = resolveSelectionAnchor();
+    if (!objects.length) return;
+    fabricCanvas.discardActiveObject();
+    objects.forEach((o) => fabricCanvas.remove(o));
+    if (focusedLockedObject && objects.includes(focusedLockedObject)) focusedLockedObject = null;
     fabricCanvas.requestRenderAll();
-    updateStylePanelVisibility();
+    updateSelectionToolbar();
   }
 
-  function createStickerGroup(left, top, width, height, color, text) {
+  function createStickerGroup(left, top, width, height, color, text, fontSize) {
     const fillColor = color || currentStickerColor;
     const pad = 14;
     // Absolute canvas coordinates for both children, matching how the arrow
@@ -2370,16 +2908,20 @@
       originX: "left",
       originY: "top",
     });
+    // Centered both ways (Miro-style note text) - originX/Y "center" anchored
+    // to the rect's own center point, rather than the top-left pad offset the
+    // left-aligned version used.
     const textbox = new fabric.Textbox(text || "", {
-      left: left + pad,
-      top: top + pad,
+      left: left + width / 2,
+      top: top + height / 2,
       width: Math.max(10, width - pad * 2),
-      fontSize: 18,
+      fontSize: fontSize || STICKER_DEFAULT_FONT_SIZE,
       fontFamily: "Montserrat, sans-serif",
       fontWeight: "500",
       fill: "#1f2937",
-      originX: "left",
-      originY: "top",
+      textAlign: "center",
+      originX: "center",
+      originY: "center",
     });
     const group = new fabric.Group([rect, textbox], {
       subTargetCheck: false,
@@ -2590,7 +3132,7 @@
 
     if (currentTool === "select" && target && isObjectLocked(target) && isLockEligibleObject(target)) {
       focusedLockedObject = target;
-      updateLockButtonsState();
+      updateSelectionToolbar();
       return;
     }
 
@@ -2611,7 +3153,7 @@
         }
         applySelectionStyles();
         updateStylePanelVisibility();
-        updateLockButtonsState();
+        updateSelectionToolbar();
         fabricCanvas.requestRenderAll();
         return;
       }
@@ -2688,7 +3230,7 @@
       renderRemoteCursors();
       drawMiniMap();
       updateGridPosition();
-      updateLockButtonsState();
+      updateSelectionToolbar();
     }
 
     if (erasing && currentTool === "eraser") {
@@ -2760,7 +3302,7 @@
       renderRemoteCursors();
       drawMiniMap();
       updateGridPosition();
-      updateLockButtonsState();
+      updateSelectionToolbar();
     }
     opt.e.preventDefault();
     opt.e.stopPropagation();
@@ -2822,7 +3364,23 @@
   fabricCanvas.on("object:scaling", (e) => {
     const target = e && e.target;
     if (!target) return;
-    if (enforceNoMirrorInTarget(target)) {
+    let changed = enforceNoMirrorInTarget(target);
+    // The canvas is set up with uniformScaling=false (so plain shapes can be
+    // freely stretched into non-square rectangles by dragging a corner
+    // without holding Shift) - but that canvas-level setting overrides a
+    // sticker's own lockUniScaling:true for corner drags, which otherwise
+    // should force a Group's scaleX/scaleY to move together. Rather than a
+    // global canvas.uniformScaling=true (which would break free-resizing for
+    // every other shape), just re-sync the two axes on every scaling tick
+    // for stickers specifically - whichever axis moved further from 1 wins,
+    // so a diagonal corner drag reads as "resize the note" instead of
+    // stretching/squishing its text.
+    if (isStickerObject(target) && target.scaleX !== target.scaleY) {
+      const primary = Math.abs(target.scaleX - 1) >= Math.abs(target.scaleY - 1) ? target.scaleX : target.scaleY;
+      target.set({ scaleX: primary, scaleY: primary });
+      changed = true;
+    }
+    if (changed) {
       fabricCanvas.requestRenderAll();
     }
   });
@@ -2835,12 +3393,22 @@
         if (obj && obj.type === "image") applyImageCornerRadius(obj, getObjectCornerRadius(obj));
       };
       if (isMultiSelectionObject(target) && typeof target.getObjects === "function") {
+        // Was one socket.emit per object (emitUpdateOpImmediate in a loop) -
+        // dragging a 20-object selection meant 20 separate WebSocket frames
+        // and 20 separate server-side history/DB writes for what is, from
+        // the user's perspective, a single move. Collect them into one
+        // batch_update instead, same as every other multi-op path already does.
+        const ops = [];
         target.getObjects().forEach((obj) => {
           if (!obj) return;
           applyOne(obj);
           obj.setCoords();
-          emitUpdateOpImmediate(obj, true);
+          if (!isSyncableObject(obj) || obj._isDraft) return;
+          ops.push(buildAction("update", { object: serializeAbsoluteObject(obj) }));
         });
+        if (ops.length && canEdit && !suppressBroadcast) {
+          socket.emit("batch_update", { ops });
+        }
       } else {
         applyOne(target);
         enqueueUpdateOp(target);
@@ -2861,9 +3429,9 @@
     focusedLockedObject = null;
     applySelectionStyles();
     updateStylePanelVisibility();
-    updateLockButtonsState();
+    updateSelectionToolbar();
     updateRotateButtonState();
-    requestAnimationFrame(updateLockButtonsState);
+    requestAnimationFrame(updateSelectionToolbar);
   });
 
   fabricCanvas.on("selection:updated", () => {
@@ -2871,16 +3439,14 @@
     focusedLockedObject = null;
     applySelectionStyles();
     updateStylePanelVisibility();
-    updateLockButtonsState();
+    updateSelectionToolbar();
     updateRotateButtonState();
-    requestAnimationFrame(updateLockButtonsState);
+    requestAnimationFrame(updateSelectionToolbar);
   });
 
   fabricCanvas.on("selection:cleared", () => {
     textEditArmedObjId = "";
-    if (stylePanel) stylePanel.classList.remove("active");
-    updateUndoRedoDockVisibility();
-    updateLockButtonsState();
+    updateSelectionToolbar();
     updateRotateButtonState();
   });
 
@@ -2892,6 +3458,7 @@
 
   if (stickerEditOverlay) {
     stickerEditOverlay.addEventListener("blur", () => exitStickerEditMode(true));
+    stickerEditOverlay.addEventListener("input", fitStickerOverlayFont);
     stickerEditOverlay.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -2929,10 +3496,14 @@
       }
 
       if (t === "shape") {
-        if (currentTool === "shape" && shapePanel && shapePanel.classList.contains("active")) {
+        if (currentTool === "shape" && currentShapeType !== "sticker" && shapePanel && shapePanel.classList.contains("active")) {
           hidePanels();
           return;
         }
+        // The "Фигуры" button always means an actual shape, never the
+        // sticker tool - if sticker was the last thing picked, fall back to
+        // a real shape so this button doesn't light up the sticker button.
+        if (currentShapeType === "sticker") setShapeType("arrow");
         setTool("shape");
         hidePanels();
         if (shapePanel) {
@@ -2956,9 +3527,50 @@
 
   imageToolBtn.addEventListener("click", () => {
     if (!canEdit) return;
+    hidePanels();
     hiddenImageInput.click();
   });
-  if (selectionLockBtn) selectionLockBtn.addEventListener("click", toggleSelectionLock);
+
+  if (stickerToolBtn) {
+    stickerToolBtn.addEventListener("click", () => {
+      if (!canEdit) return;
+      hidePanels();
+      setShapeType("sticker");
+      setTool("shape");
+    });
+  }
+
+  if (selColorBtn) {
+    selColorBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSelPopover(selColorPopover, selColorBtn);
+    });
+  }
+  if (selFillBtn) {
+    selFillBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSelPopover(selFillPopover, selFillBtn);
+    });
+  }
+  if (selStrokeBtn) {
+    selStrokeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSelPopover(selStrokePopover, selStrokeBtn);
+    });
+  }
+  if (selCornerBtn) {
+    selCornerBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSelPopover(selCornerPopover, selCornerBtn);
+    });
+  }
+  if (selLockBtn) selLockBtn.addEventListener("click", toggleSelectionLock);
+  if (selDeleteBtn) {
+    selDeleteBtn.addEventListener("click", () => {
+      if (!canEdit) return;
+      deleteActiveObjects();
+    });
+  }
 
   hiddenImageInput.addEventListener("change", () => {
     const file = hiddenImageInput.files && hiddenImageInput.files[0];
@@ -2986,7 +3598,7 @@
     customColorState.s = rect.width > 0 ? x / rect.width : 0;
     customColorState.v = rect.height > 0 ? 1 - y / rect.height : 0;
     syncCustomInputsFromState();
-    applyChosenColor(colorFromCustomStateHex(), true);
+    applyCustomColorPick(colorFromCustomStateHex());
   }
 
   function updateHueByClient(clientX) {
@@ -2996,7 +3608,7 @@
     const nextHue = rect.width > 0 ? (x / rect.width) * 360 : 0;
     customColorState.h = Math.max(0, Math.min(359.999, nextHue));
     syncCustomInputsFromState();
-    applyChosenColor(colorFromCustomStateHex(), true);
+    applyCustomColorPick(colorFromCustomStateHex());
   }
 
   if (customColorSv) {
@@ -3081,95 +3693,154 @@
     });
   }
 
-  if (deleteSelectionBtn) {
-    deleteSelectionBtn.addEventListener("click", () => {
-      if (!canEdit) return;
-      deleteActiveObjects();
-    });
-  }
 
   undoBtn.addEventListener("click", () => socket.emit("undo"));
   redoBtn.addEventListener("click", () => socket.emit("redo"));
-  if (rotateBtn) {
-    rotateBtn.addEventListener("click", () => {
-      const active = fabricCanvas.getActiveObject();
-      if (!active || !canEdit) return;
-      active.rotate((active.angle || 0) + 15);
-      active.setCoords();
-      fabricCanvas.requestRenderAll();
-      enqueueSelectionUpdates();
-    });
+  // Click still nudges by 15° (see rotateDragState.moved below), but
+  // press-and-hold now lets you drag to rotate freely, tracking the pointer
+  // angle around the object's center - Shift snaps to 15° increments while
+  // dragging, same as the old click-only behavior's step size.
+  let rotateDragState = null;
+
+  function startRotateDrag(e) {
+    const active = fabricCanvas.getActiveObject();
+    if (!active || !canEdit) return;
+    active.setCoords();
+    const center = active.getCenterPoint();
+    const centerScreen = screenFromWorld(center.x, center.y);
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const centerX = canvasRect.left + centerScreen.x;
+    const centerY = canvasRect.top + centerScreen.y;
+    rotateDragState = {
+      target: active,
+      centerX,
+      centerY,
+      startPointerAngle: Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI),
+      startObjectAngle: active.angle || 0,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      moved: false,
+    };
+    if (typeof selRotateBtn.setPointerCapture === "function") {
+      try { selRotateBtn.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    }
   }
-  clearBtn.addEventListener("click", () => socket.emit("clear"));
+
+  function onRotateDragMove(e) {
+    if (!rotateDragState) return;
+    const dx = e.clientX - rotateDragState.startClientX;
+    const dy = e.clientY - rotateDragState.startClientY;
+    if (!rotateDragState.moved && Math.hypot(dx, dy) < 4) return;
+    rotateDragState.moved = true;
+    const currentPointerAngle = Math.atan2(
+      e.clientY - rotateDragState.centerY,
+      e.clientX - rotateDragState.centerX,
+    ) * (180 / Math.PI);
+    let nextAngle = rotateDragState.startObjectAngle + (currentPointerAngle - rotateDragState.startPointerAngle);
+    if (e.shiftKey) nextAngle = Math.round(nextAngle / 15) * 15;
+    rotateDragState.target.rotate(nextAngle);
+    rotateDragState.target.setCoords();
+    fabricCanvas.requestRenderAll();
+  }
+
+  function endRotateDrag() {
+    if (!rotateDragState) return;
+    const { target, moved } = rotateDragState;
+    if (!moved) {
+      target.rotate((target.angle || 0) + 15);
+      target.setCoords();
+      fabricCanvas.requestRenderAll();
+    }
+    rotateDragState = null;
+    enqueueSelectionUpdates();
+    updateSelectionToolbar();
+  }
+
+  if (selRotateBtn) {
+    selRotateBtn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startRotateDrag(e);
+    });
+    window.addEventListener("pointermove", onRotateDragMove);
+    window.addEventListener("pointerup", endRotateDrag);
+  }
+  clearBtn.addEventListener("click", async () => {
+    const ok = await showConfirmModal({
+      title: "Очистить доску?",
+      body: "Все объекты на доске будут удалены без возможности восстановления.",
+      confirmLabel: "Очистить",
+    });
+    if (ok) socket.emit("clear");
+  });
   bgBtn.addEventListener("click", toggleBackground);
 
   if (miroImportBtn) {
-    miroImportBtn.addEventListener("click", async () => {
+    miroImportBtn.addEventListener("click", () => {
       if (!canEdit) return;
-      const miroBoardId = window.prompt(
-        "ID доски Miro (из ссылки вида miro.com/app/board/XXXXXXXXXXX=/):",
-      );
-      if (!miroBoardId) return;
-      const miroToken = window.prompt("Miro personal access token (Settings → Your apps):");
-      if (!miroToken) return;
+      openMiroImportModal();
+    });
+  }
+  if (miroModalCancel) miroModalCancel.addEventListener("click", closeModal);
+  if (miroModalOk) {
+    miroModalOk.addEventListener("click", async () => {
+      const miroBoardId = extractMiroBoardId(miroBoardUrlInput.value);
+      const miroToken = (miroTokenInput.value || "").trim();
+      if (!miroBoardId) {
+        setMiroModalStatus("Укажите ссылку или ID доски Miro", "error");
+        return;
+      }
+      if (!miroToken) {
+        setMiroModalStatus("Укажите personal access token", "error");
+        return;
+      }
 
-      miroImportBtn.disabled = true;
-      showBoardNotice("Импортируем доску из Miro…");
+      if (miroRememberToken && miroRememberToken.checked) {
+        localStorage.setItem(MIRO_TOKEN_STORAGE_KEY, miroToken);
+      } else {
+        localStorage.removeItem(MIRO_TOKEN_STORAGE_KEY);
+      }
+
+      miroModalOk.disabled = true;
+      miroModalCancel.disabled = true;
+      if (miroModalOkLabel) miroModalOkLabel.textContent = "Импортируем…";
+      setMiroModalStatus("Импортируем доску из Miro…", "info");
       try {
         const headers = { "Content-Type": "application/json" };
         if (pageToken) headers["Authorization"] = `Bearer ${pageToken}`;
         const res = await fetch(`/api/board/${encodeURIComponent(boardId)}/import/miro`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ miro_board_id: miroBoardId.trim(), miro_token: miroToken.trim() }),
+          body: JSON.stringify({ miro_board_id: miroBoardId, miro_token: miroToken }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          showBoardError(data.detail || "Не удалось импортировать доску из Miro");
+          setMiroModalStatus(data.detail || "Не удалось импортировать доску из Miro", "error");
           return;
         }
-        showBoardNotice(`Импортировано объектов: ${data.imported}, пропущено: ${data.skipped}`);
+        setMiroModalStatus(`Импортировано объектов: ${data.imported}, пропущено: ${data.skipped}`, "success");
+        showBoardNotice(`Импортировано объектов: ${data.imported}, пропущено: ${data.skipped}`, "success");
+        setTimeout(closeModal, 1200);
       } catch (err) {
-        showBoardError(err?.message || "Не удалось импортировать доску из Miro");
+        setMiroModalStatus(err?.message || "Не удалось импортировать доску из Miro", "error");
       } finally {
-        miroImportBtn.disabled = false;
+        miroModalOk.disabled = false;
+        miroModalCancel.disabled = false;
+        if (miroModalOkLabel) miroModalOkLabel.textContent = "Импортировать";
       }
     });
   }
-  if (mobileBgBtn) mobileBgBtn.addEventListener("click", toggleBackground);
-
-  if (mobileImageBtn) {
-    mobileImageBtn.addEventListener("click", () => {
-      if (!canEdit) return;
-      hiddenImageInput.click();
-    });
-  }
-  if (mobileRotateBtn) {
-    mobileRotateBtn.addEventListener("click", () => {
-      if (rotateBtn) rotateBtn.click();
-    });
-  }
-  if (mobileClearBtn) {
-    mobileClearBtn.addEventListener("click", () => {
-      if (clearBtn) clearBtn.click();
-    });
-  }
-  if (mobileMoreBtn && mobileMorePanel) {
-    mobileMoreBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      updateRotateButtonState();
-      const active = mobileMorePanel.classList.contains("active");
-      hidePanels();
-      if (!active) {
-        mobileMorePanel.classList.add("active");
-        placePanelNear(mobileMorePanel, mobileMoreBtn);
-      }
-    });
-  }
-
   zoomOutBtn.addEventListener("click", () => zoomByFactor(0.9, fabricCanvas.getWidth() / 2, fabricCanvas.getHeight() / 2));
   zoomInBtn.addEventListener("click", () => zoomByFactor(1.1, fabricCanvas.getWidth() / 2, fabricCanvas.getHeight() / 2));
   zoomCenterBtn.addEventListener("click", resetView);
+
+  if (miniCollapseBtn && miniWrap) {
+    // Small screens only (see CSS) - reclaim canvas space by hiding the
+    // minimap preview while keeping the zoom controls one tap away.
+    miniCollapseBtn.addEventListener("click", () => {
+      miniWrap.classList.toggle("is-collapsed");
+    });
+  }
 
   miniMapEl.addEventListener("pointerdown", (e) => {
     e.preventDefault();
@@ -3241,7 +3912,7 @@
     resizeCanvas(false);
     syncAllITextLayouts();
     hidePanels();
-    updateLockButtonsState();
+    updateSelectionToolbar();
   });
 
   if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === "function") {
@@ -3260,6 +3931,9 @@
     }
     const inside = e.target.closest("#toolbar") || e.target.closest(".floating-panel");
     if (!inside) hidePanels();
+
+    const insideSelToolbar = e.target.closest(".sel-toolbar") || e.target.closest(".sel-popover");
+    if (!insideSelToolbar) closeSelPopovers();
   });
 
   boardWrap.addEventListener("mousedown", (e) => {
@@ -3354,8 +4028,43 @@
     if (pinchMode && activeTouchPointers.size < 2) stopPinch();
   }, { passive: false, capture: true });
 
+  // Belt-and-braces on top of Fabric's own mouse:wheel preventDefault (see
+  // above): Ctrl/Cmd+scroll and trackpad pinch both fire as a native `wheel`
+  // event with ctrlKey set, and if that ever reaches the browser undefended
+  // (e.g. a listener elsewhere on the page registered passively) it zooms
+  // the whole page instead of just the canvas - locking the toolbar off
+  // screen with no way back except resetting browser zoom manually. Bound to
+  // document (not just boardWrap) since the toolbar/panels are separate
+  // fixed-position siblings, not children of boardWrap - Ctrl+scroll over
+  // them needs blocking too.
+  document.addEventListener("wheel", (e) => {
+    if (e.ctrlKey || e.metaKey) e.preventDefault();
+  }, { passive: false, capture: true });
+
+  // Safari doesn't fire wheel+ctrlKey for trackpad pinch - it uses these
+  // non-standard gesture events instead. Just preventDefault-ing them (as a
+  // prior version of this code did) blocked Safari's native pinch-to-zoom-
+  // the-page fallback without ever wiring the gesture to actually zoom the
+  // canvas, which silently took away pinch-zoom for Safari trackpad users
+  // entirely - drive zoomByFactor from the gesture's own scale instead so
+  // the pinch still does something.
+  let gestureStartZoom = 1;
+  document.addEventListener("gesturestart", (e) => {
+    e.preventDefault();
+    gestureStartZoom = fabricCanvas.getZoom();
+  }, { passive: false });
+  document.addEventListener("gesturechange", (e) => {
+    e.preventDefault();
+    if (!boardWrap.contains(e.target)) return;
+    const rect = canvasEl.getBoundingClientRect();
+    const targetZoom = Math.max(0.08, Math.min(24, gestureStartZoom * e.scale));
+    const factor = targetZoom / fabricCanvas.getZoom();
+    zoomByFactor(factor, e.clientX - rect.left, e.clientY - rect.top);
+  }, { passive: false });
+  document.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
+
   fabricCanvas.on("after:render", () => {
-    updateLockButtonsState();
+    updateSelectionToolbar();
   });
 
   function updateLastSeenSeq(ops) {
@@ -3409,7 +4118,7 @@
         socket.connect();
         return;
       }
-      showConnectionNotice("Сессия подключения истекла. Обновите страницу.", 0);
+      showConnectionNotice("Сессия подключения истекла. Обновите страницу.", 0, "error");
       return;
     }
     showConnectionNotice("Не удается подключиться к доске. Проверяем связь…", 3000);
@@ -3430,11 +4139,10 @@
     canClear = !!msg.can_clear;
 
     clearBtn.style.display = canClear ? "inline-flex" : "none";
-    if (mobileClearBtn) mobileClearBtn.style.display = canClear ? "inline-flex" : "none";
 
     applyEditPermissions();
     if (hadConnectionDrop) {
-      showConnectionNotice("Соединение восстановлено", 0);
+      showConnectionNotice("Соединение восстановлено", 0, "success");
       hadConnectionDrop = false;
     }
 
@@ -3485,12 +4193,6 @@
     applyEditPermissions();
   });
 
-  socket.on("ops", (msg) => {
-    if (msg && Array.isArray(msg.ops)) {
-      applyRemoteOps(msg.ops);
-      updateLastSeenSeq(msg.ops);
-    }
-  });
   socket.on("batch_update", (msg) => {
     if (msg && Array.isArray(msg.ops)) {
       applyRemoteOps(msg.ops);

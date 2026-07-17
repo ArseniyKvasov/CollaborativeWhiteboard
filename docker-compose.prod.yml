@@ -63,6 +63,27 @@ services:
       retries: 5
       start_period: 15s
 
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whiteboard-celery-worker-prod
+    env_file:
+      - .env.production
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      # Must match the web service's UPLOAD_DIR - the worker reads staged
+      # uploads and writes processed images to the same volume the web
+      # service serves /uploads from.
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - whiteboard_data:/data
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   whiteboard_data:
   postgres_prod_data:

@@ -9,13 +9,84 @@
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600&display=swap" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <meta name="color-scheme" content="light dark">
   <style>
     :root {
-      --toolbar-top: 14px;
+      --toolbar-top: 16px;
       --safe-top: max(8px, env(safe-area-inset-top, 0px));
       --safe-right: max(8px, env(safe-area-inset-right, 0px));
       --safe-bottom: max(8px, env(safe-area-inset-bottom, 0px));
       --safe-left: max(8px, env(safe-area-inset-left, 0px));
+
+      /* --- Design tokens ------------------------------------------------- */
+      --accent: #16a34a;
+      --accent-hover: #15803d;
+      --accent-soft: #dcfce7;
+      --accent-contrast: #ffffff;
+
+      --danger: #e5484d;
+      --danger-soft: #fde8e8;
+      --success: #0d9488;
+      --success-soft: #e0f7f3;
+      --warning: #b8790a;
+      --warning-soft: #fdf1dc;
+      --info: var(--accent);
+      --info-soft: var(--accent-soft);
+
+      --page-bg: #eaf7ee;
+      --paper-bg: #ffffff;
+      --grid-dot: rgba(13, 58, 33, 0.15);
+
+      --chrome-bg: rgba(255, 255, 255, 0.84);
+      --chrome-border: rgba(13, 58, 33, 0.09);
+      --chrome-shadow: 0 1px 2px rgba(11, 31, 20, 0.04), 0 16px 36px -12px rgba(11, 31, 20, 0.2);
+      --chrome-shadow-sm: 0 1px 2px rgba(11, 31, 20, 0.05), 0 8px 20px -8px rgba(11, 31, 20, 0.16);
+
+      --ink: #16241c;
+      --ink-soft: #4b5d52;
+      --ink-faint: #7c8c81;
+
+      --control-bg: #f0faf3;
+      --control-bg-hover: #e0f3e5;
+      --control-border: rgba(13, 58, 33, 0.08);
+
+      --radius-lg: 18px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #0f1712;
+        --chrome-bg: rgba(20, 28, 22, 0.84);
+        --chrome-border: rgba(255, 255, 255, 0.08);
+        --chrome-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 18px 40px -14px rgba(0, 0, 0, 0.55);
+        --chrome-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 22px -10px rgba(0, 0, 0, 0.5);
+
+        --ink: #eaf5ee;
+        --ink-soft: #b9ccbf;
+        --ink-faint: #82988a;
+
+        --control-bg: rgba(255, 255, 255, 0.06);
+        --control-bg-hover: rgba(255, 255, 255, 0.12);
+        --control-border: rgba(255, 255, 255, 0.09);
+
+        --accent-soft: rgba(22, 163, 74, 0.24);
+        --danger-soft: rgba(229, 72, 77, 0.2);
+        --success-soft: rgba(13, 148, 136, 0.22);
+        --warning-soft: rgba(184, 121, 10, 0.22);
+      }
+
+      /* The canvas itself stays a light "sheet of paper" even in dark chrome
+         (matching Miro/FigJam) - shapes are authored with dark-ink defaults,
+         so a dark canvas would tank their contrast. Only the surrounding UI
+         chrome themes with the system. */
+    }
+
+    * {
+      box-sizing: border-box;
     }
 
     html, body {
@@ -23,9 +94,11 @@
       height: 100%;
       margin: 0;
       overflow: hidden;
-      background: #eef3ff;
+      background: var(--page-bg);
       touch-action: none;
       font-family: "Montserrat", "Segoe UI", sans-serif;
+      color: var(--ink);
+      -webkit-tap-highlight-color: transparent;
     }
 
     #boardWrap {
@@ -35,10 +108,8 @@
       user-select: none;
       -webkit-user-select: none;
       -webkit-touch-callout: none;
-      background:
-        linear-gradient(90deg, rgba(17, 24, 39, 0.045) 1px, transparent 1px),
-        linear-gradient(rgba(17, 24, 39, 0.045) 1px, transparent 1px),
-        #fff;
+      background-color: var(--paper-bg);
+      background-image: radial-gradient(circle, var(--grid-dot) 1.1px, transparent 1.6px);
       background-size: 24px 24px;
     }
 
@@ -52,7 +123,7 @@
     }
 
     #boardWrap.bg-white {
-      background: #fff;
+      background-color: var(--paper-bg);
     }
 
     #canvas {
@@ -65,61 +136,374 @@
       position: absolute;
       inset: 0;
       pointer-events: none;
-      z-index: 20;
+      z-index: 15;
     }
 
-    .selection-lock-btn {
+    /* --- Contextual selection mini-toolbar --------------------------------
+       Floats directly above whatever is selected (single object, sticker, or
+       a same-type multi-selection) - icons only, popovers for anything that
+       needs more than a click. Deliberately small: this is a companion to
+       the object, not another panel competing with the main toolbar.
+       z-index layering within this floating-chrome cluster (lowest to
+       highest): cursorLayer < floating-panel < sel-toolbar = sel-popover =
+       customColorPanel(when opened from here) < floating-toolbar/undo-redo-
+       dock/mini-wrap - the toolbar, undo/redo dock and minimap always win
+       over every on-canvas element and every other panel. The sel-popovers
+       (and customColorPanel, when it's the mini-toolbar's own color/fill
+       trigger that opened it) share the mini-toolbar's own z-index since
+       they're just an extension of it, not a separate layer - and, like the
+       mini-toolbar itself, they're repositioned every time it moves (pan/
+       zoom) instead of staying fixed in screen space (see
+       repositionOpenSelPopovers in board.js). */
+    .sel-toolbar {
       position: fixed;
-      z-index: 36;
+      z-index: 21;
       display: none;
-      box-shadow: 0 10px 24px rgba(17, 24, 39, 0.18);
+      align-items: center;
+      gap: 2px;
+      padding: 4px;
+      border-radius: 999px;
+      background: var(--chrome-bg);
+      border: 1px solid var(--chrome-border);
+      box-shadow: var(--chrome-shadow-sm);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    }
+
+    .sel-toolbar.active {
+      display: inline-flex;
+    }
+
+    .sel-btn {
+      width: 30px;
+      height: 30px;
+      border: 0;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      color: var(--ink-soft);
+      flex: 0 0 auto;
+      transition: background-color 140ms var(--ease), color 140ms var(--ease);
+    }
+
+    .sel-btn .bi-local {
+      width: 15px;
+      height: 15px;
+    }
+
+    .sel-btn:hover {
+      background: var(--control-bg-hover);
+      color: var(--ink);
+    }
+
+    .sel-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .sel-btn[disabled] {
+      display: none;
+    }
+
+    .sel-btn-danger {
+      color: var(--danger);
+    }
+
+    .sel-btn-danger:hover {
+      background: var(--danger-soft);
+      color: #b32227;
+    }
+
+    .sel-toolbar-sep {
+      width: 1px;
+      height: 18px;
+      background: var(--chrome-border);
+      margin: 0 2px;
+      flex: 0 0 auto;
+    }
+
+    .sel-toolbar-sep.is-hidden {
+      display: none;
+    }
+
+    .sel-swatch-dot {
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      box-shadow: inset 0 0 0 1px rgba(20, 20, 43, 0.12);
+      background: var(--accent);
+    }
+
+    .sel-popover {
+      position: fixed;
+      z-index: 21;
+      display: none;
+      padding: 10px;
+      border-radius: var(--radius-md);
+      background: var(--chrome-bg);
+      border: 1px solid var(--chrome-border);
+      box-shadow: var(--chrome-shadow);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    }
+
+    .sel-popover.active {
+      display: block;
+      animation: panel-in 140ms var(--ease);
+    }
+
+    .sel-popover .palette {
+      /* .sel-popover (unlike .floating-panel) has no fixed width of its own,
+         so it shrink-wraps to content - the palette grid's `repeat(4, 1fr)`
+         columns then have nothing to distribute against and collapse to
+         near-zero. Give the grid its own explicit width to size against. */
+      width: 200px;
+      margin-bottom: 0;
+    }
+
+    .sel-popover-slider {
+      width: 160px;
     }
 
     #boardNotice {
       position: fixed;
       left: 50%;
-      top: max(calc(var(--toolbar-top) + 56px), var(--safe-top));
-      transform: translate(-50%, -10px);
+      top: max(calc(var(--toolbar-top) + 58px), var(--safe-top));
+      transform: translate(-50%, -8px) scale(0.97);
       z-index: 38;
       min-width: 220px;
-      max-width: min(86vw, 560px);
-      padding: 10px 14px;
-      border-radius: 11px;
-      border: 1px solid #fecaca;
-      background: rgba(254, 242, 242, 0.96);
-      color: #b91c1c;
-      box-shadow: 0 10px 22px rgba(17, 24, 39, 0.16);
+      max-width: min(90vw, 560px);
+      padding: 11px 18px;
+      border-radius: 999px;
+      border: 1px solid var(--danger-soft);
+      background: color-mix(in srgb, var(--danger-soft) 88%, white);
+      color: #9c1d21;
+      box-shadow: var(--chrome-shadow-sm);
       font-size: 13px;
       font-weight: 600;
+      letter-spacing: 0.01em;
       text-align: center;
       opacity: 0;
       visibility: hidden;
       pointer-events: none;
-      transition: opacity 130ms ease, transform 130ms ease, visibility 130ms ease;
+      transition: opacity 160ms var(--ease), transform 160ms var(--ease), visibility 160ms;
     }
 
     #boardNotice.is-visible {
       opacity: 1;
       visibility: visible;
-      transform: translate(-50%, 0);
+      transform: translate(-50%, 0) scale(1);
+    }
+
+    #boardNotice.is-success {
+      border-color: var(--success-soft);
+      background: color-mix(in srgb, var(--success-soft) 88%, white);
+      color: #0d6b4c;
+    }
+
+    #boardNotice.is-info {
+      border-color: var(--accent-soft);
+      background: color-mix(in srgb, var(--accent-soft) 88%, white);
+      color: var(--accent-hover);
+    }
+
+    #boardNotice.is-warning {
+      border-color: var(--warning-soft);
+      background: color-mix(in srgb, var(--warning-soft) 88%, white);
+      color: #8a5b06;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      #boardNotice { background: #2f1f21; color: #ffb3b5; border-color: rgba(229, 72, 77, 0.35); }
+      #boardNotice.is-success { background: #103330; color: #7fe0d3; border-color: rgba(13, 148, 136, 0.45); }
+      #boardNotice.is-info { background: #123420; color: #a9e8bd; border-color: rgba(22, 163, 74, 0.45); }
+      #boardNotice.is-warning { background: #332508; color: #f3c876; border-color: rgba(184, 121, 10, 0.4); }
+    }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.42);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      padding: 16px;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal-card {
+      display: none;
+      width: 100%;
+      max-width: 400px;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      background: var(--chrome-bg);
+      border: 1px solid var(--chrome-border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--chrome-shadow);
+      padding: 22px;
+      animation: panel-in 160ms var(--ease);
+    }
+
+    .modal-card.active {
+      display: block;
+    }
+
+    .modal-title {
+      margin: 0 0 8px;
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .modal-text {
+      margin: 0 0 14px;
+      font-size: 13.5px;
+      line-height: 1.5;
+      color: var(--ink-soft);
+    }
+
+    .modal-hint {
+      margin: 8px 0 0;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--ink-faint);
+    }
+
+    .modal-hint a {
+      color: var(--accent-hover);
+    }
+
+    .modal-label {
+      display: block;
+      margin: 14px 0 6px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--ink-soft);
+    }
+
+    .modal-input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 9px 11px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--control-border);
+      background: var(--control-bg);
+      color: var(--ink);
+      font-size: 13.5px;
+    }
+
+    .modal-input-masked {
+      /* Visually obscures the token like a password field would, without
+         actually being type="password" (see the comment by miroTokenInput).
+         Chrome/Safari support this; browsers that don't (Firefox) just show
+         the token in plain text, which is a harmless fallback. */
+      -webkit-text-security: disc;
+      text-security: disc;
+    }
+
+    .modal-input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    .modal-check {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 12px;
+      font-size: 12.5px;
+      color: var(--ink-soft);
+      cursor: pointer;
+    }
+
+    .modal-status {
+      margin-top: 12px;
+      font-size: 12.5px;
+      font-weight: 600;
+      min-height: 0;
+    }
+
+    .modal-status.is-error { color: var(--danger); }
+    .modal-status.is-info { color: var(--accent-hover); }
+    .modal-status.is-success { color: #0d6b4c; }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .modal-btn {
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--chrome-border);
+      background: var(--control-bg);
+      color: var(--ink);
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 140ms var(--ease);
+    }
+
+    .modal-btn:hover {
+      background: var(--control-bg-hover);
+    }
+
+    .modal-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .modal-btn-primary {
+      border-color: transparent;
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .modal-btn-primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .modal-btn-danger {
+      border-color: transparent;
+      background: var(--danger);
+      color: #fff;
+    }
+
+    .modal-btn-danger:hover {
+      background: #b32227;
     }
 
     .remote-cursor {
       position: absolute;
       transform: translate(-2px, -2px);
-      color: #5b21b6;
+      color: var(--accent-hover);
       font-size: 14px;
       white-space: nowrap;
+      filter: drop-shadow(0 2px 4px rgba(20, 20, 43, 0.25));
     }
 
     .remote-cursor .name {
       margin-left: 4px;
-      background: rgba(91, 33, 182, 0.1);
-      border: 1px solid rgba(91, 33, 182, 0.3);
-      color: #4c1d95;
+      background: var(--accent);
+      border: 1px solid color-mix(in srgb, var(--accent) 60%, black);
+      color: #fff;
       border-radius: 999px;
-      padding: 1px 7px;
+      padding: 2px 8px;
       font-size: 11px;
+      font-weight: 600;
+      box-shadow: 0 2px 8px rgba(20, 20, 43, 0.2);
     }
 
     .remote-cursor.offscreen .name {
@@ -133,14 +517,15 @@
       transform: translateX(-50%);
       z-index: 30;
       display: inline-flex;
-      gap: 8px;
+      gap: 4px;
       align-items: center;
-      padding: 8px;
-      border-radius: 14px;
-      background: rgba(255, 255, 255, 0.92);
-      border: 1px solid #dce4f3;
-      box-shadow: 0 12px 30px rgba(17, 24, 39, 0.14);
-      backdrop-filter: blur(7px);
+      padding: 6px;
+      border-radius: var(--radius-lg);
+      background: var(--chrome-bg);
+      border: 1px solid var(--chrome-border);
+      box-shadow: var(--chrome-shadow);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
       max-width: calc(100vw - 24px);
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
@@ -149,6 +534,7 @@
       pointer-events: auto;
       touch-action: manipulation;
       user-select: none;
+      transition: top 200ms var(--ease);
     }
 
     .floating-toolbar::-webkit-scrollbar {
@@ -160,42 +546,51 @@
     .tool-btn {
       position: relative;
       z-index: 1;
-      width: 38px;
-      height: 38px;
+      width: 40px;
+      height: 40px;
       border: 0;
-      border-radius: 10px;
+      border-radius: var(--radius-sm);
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      background: #f2f6ff;
-      color: #334155;
+      background: transparent;
+      color: var(--ink-soft);
       flex: 0 0 auto;
       pointer-events: auto;
       touch-action: manipulation;
       -webkit-tap-highlight-color: transparent;
+      transition: background-color 140ms var(--ease), color 140ms var(--ease), transform 100ms var(--ease);
     }
 
     .tool-btn:hover {
-      background: #e3ebff;
-      color: #1d4ed8;
+      background: var(--control-bg-hover);
+      color: var(--accent-hover);
+    }
+
+    .tool-btn:active {
+      transform: scale(0.92);
     }
 
     .tool-btn.active {
-      background: #0d6efd;
+      background: var(--accent);
       color: #fff;
-      box-shadow: 0 10px 24px rgba(13, 110, 253, 0.35);
+      box-shadow: 0 8px 18px -4px color-mix(in srgb, var(--accent) 55%, transparent);
+    }
+
+    .tool-btn.active:hover {
+      background: var(--accent-hover);
+      color: #fff;
     }
 
     .tool-btn:disabled {
-      opacity: 0.35;
-    }
-
-    .desktop-only {
-      display: inline-flex;
-    }
-
-    .mobile-only {
-      display: none;
+      /* Fading a small masked icon with opacity reads as "did it just
+         disappear?" rather than "disabled" - at any small size the eye can't
+         tell muted from missing. Keep opacity at 1 and rely purely on a
+         flatter, less saturated color so the icon stays unambiguously
+         visible while still reading as inactive. */
+      opacity: 1;
+      color: var(--ink-soft);
+      pointer-events: none;
     }
 
     .bi-local {
@@ -206,30 +601,81 @@
       -webkit-mask-image: var(--icon);
       -webkit-mask-repeat: no-repeat;
       -webkit-mask-position: center;
-      -webkit-mask-size: contain;
+      /* A handful of source icons (e.g. arrow-repeat) have paths that touch
+         the very edge of their own viewBox - at these small pixel sizes,
+         mask-size:contain leaves zero margin and sub-pixel rounding clips a
+         sliver off those edges. A few percent of headroom keeps every icon
+         fully visible without being a noticeably smaller glyph. */
+      -webkit-mask-size: 88%;
       mask-image: var(--icon);
       mask-repeat: no-repeat;
       mask-position: center;
-      mask-size: contain;
+      mask-size: 88%;
     }
 
     .floating-panel {
       position: fixed;
-      z-index: 35;
+      z-index: 20;
       display: none;
-      padding: 10px;
-      width: 228px;
-      border-radius: 14px;
-      border: 1px solid #dce4f3;
-      background: rgba(255, 255, 255, 0.95);
-      box-shadow: 0 10px 26px rgba(17, 24, 39, 0.16);
-      backdrop-filter: blur(6px);
+      padding: 14px;
+      width: 232px;
+      max-width: calc(100vw - 24px);
+      max-height: calc(100vh - 24px);
+      overflow-y: auto;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--chrome-border);
+      background: var(--chrome-bg);
+      box-shadow: var(--chrome-shadow);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
       pointer-events: auto;
       touch-action: manipulation;
     }
 
     .floating-panel.active {
       display: block;
+      animation: panel-in 160ms var(--ease);
+    }
+
+    @keyframes panel-in {
+      from { opacity: 0; transform: translateY(4px) scale(0.98); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .floating-panel .form-label {
+      color: var(--ink-faint);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .floating-panel .form-range {
+      accent-color: var(--accent);
+    }
+
+    /* Bootstrap reskins the range thumb/track with its own pseudo-elements
+       (explicit background-color), which ignores plain accent-color - so the
+       thumb has to be overridden directly to pick up the green theme. */
+    .floating-panel .form-range::-webkit-slider-thumb {
+      background-color: var(--accent);
+    }
+
+    .floating-panel .form-range::-moz-range-thumb {
+      background-color: var(--accent);
+      border: 0;
+    }
+
+    .floating-panel .form-range::-webkit-slider-runnable-track {
+      background-color: var(--control-bg-hover);
+    }
+
+    .floating-panel .form-range::-moz-range-track {
+      background-color: var(--control-bg-hover);
+    }
+
+    .floating-panel .form-range:focus::-webkit-slider-thumb {
+      box-shadow: 0 0 0 1px var(--chrome-bg), 0 0 0 3px var(--accent-soft);
     }
 
     .shape-grid {
@@ -239,31 +685,35 @@
     }
 
     .shape-btn {
-      height: 36px;
-      border: 1px solid #dce4f3;
-      border-radius: 10px;
-      background: #f8fbff;
-      color: #334155;
+      height: 38px;
+      border: 1px solid var(--control-border);
+      border-radius: var(--radius-sm);
+      background: var(--control-bg);
+      color: var(--ink-soft);
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
       font-size: 12px;
       font-weight: 600;
+      transition: background-color 140ms var(--ease), color 140ms var(--ease), border-color 140ms var(--ease);
+    }
+
+    .shape-btn:hover {
+      background: var(--control-bg-hover);
+      color: var(--ink);
     }
 
     .shape-btn.active {
-      border-color: #0d6efd;
-      color: #0d6efd;
-      background: #eef4ff;
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
     }
 
     .shape-btn:disabled {
-      opacity: 0.35;
+      opacity: 1;
+      color: var(--ink-soft);
       cursor: not-allowed;
-      background: #f3f4f6;
-      color: #94a3b8;
-      border-color: #e2e8f0;
     }
 
     .shape-arrow-glyph {
@@ -276,15 +726,16 @@
       position: fixed;
       left: max(12px, var(--safe-left));
       bottom: max(12px, var(--safe-bottom));
-      z-index: 31;
+      z-index: 30;
       display: inline-flex;
-      gap: 8px;
-      padding: 8px;
-      border-radius: 12px;
-      border: 1px solid #dce4f3;
-      background: rgba(255, 255, 255, 0.92);
-      box-shadow: 0 10px 24px rgba(17, 24, 39, 0.14);
-      backdrop-filter: blur(7px);
+      gap: 4px;
+      padding: 6px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--chrome-border);
+      background: var(--chrome-bg);
+      box-shadow: var(--chrome-shadow-sm);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
     }
 
     .undo-redo-dock.is-hidden {
@@ -293,31 +744,49 @@
 
     .palette {
       display: grid;
-      grid-template-columns: repeat(4, 30px);
+      grid-template-columns: repeat(4, 1fr);
       gap: 10px;
       margin-bottom: 12px;
       justify-content: space-between;
     }
 
     .swatch {
-      width: 30px;
-      height: 30px;
+      width: 100%;
+      aspect-ratio: 1 / 1;
       border-radius: 999px;
       border: 2px solid transparent;
-      box-shadow: none;
+      box-shadow: inset 0 0 0 1px rgba(20, 20, 43, 0.06);
       cursor: pointer;
       padding: 0;
-      transition: transform 100ms ease, border-color 100ms ease;
+      transition: transform 140ms var(--ease), border-color 140ms var(--ease);
     }
 
     .swatch:hover {
-      transform: scale(1.08);
-      border-color: #0d6efd;
+      transform: scale(1.1);
     }
 
     .swatch.active {
-      border: 2px solid #0d6efd;
-      box-shadow: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--chrome-bg), 0 0 0 3px var(--accent);
+    }
+
+    .swatch-none {
+      position: relative;
+      background:
+        linear-gradient(rgba(255,255,255,0.9), rgba(255,255,255,0.9)),
+        repeating-conic-gradient(#c7cdd6 0% 25%, #eef0f4 0% 50%) 50% / 8px 8px;
+      overflow: hidden;
+    }
+
+    .swatch-none::after {
+      content: "";
+      position: absolute;
+      left: 10%;
+      top: 50%;
+      width: 80%;
+      height: 2px;
+      background: var(--danger);
+      transform: rotate(-45deg);
     }
 
     .swatch-custom-trigger {
@@ -335,8 +804,7 @@
           #ec4899,
           #ef4444
         );
-      border: 1px solid #94a3b8;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+      border: 1px solid rgba(20, 20, 43, 0.14);
       overflow: hidden;
     }
 
@@ -364,15 +832,25 @@
 
     #customColorPanel {
       width: 212px;
-      padding: 7px;
+      padding: 10px;
+      /* Shared by both the toolbar pencil-color trigger and the mini
+         selection-toolbar's color trigger - the gradient square/hue strip
+         already read as a distinct control, the extra outer border was just
+         visual noise on top of theirs. */
+      border: none;
+      /* Same tier as .sel-toolbar/.sel-popover (21) - when opened from the
+         mini-toolbar's color/fill trigger this panel is just an extension of
+         it, not a separate layer above it. Also comfortably above
+         .floating-panel (20) for the toolbar's own pencil-color trigger. */
+      z-index: 21;
     }
 
     .color-sv {
       position: relative;
       width: 100%;
       aspect-ratio: 1 / 1;
-      border: 1px solid #d0daee;
-      border-radius: 4px;
+      border: 1px solid var(--control-border);
+      border-radius: 8px;
       cursor: crosshair;
       overflow: hidden;
       background:
@@ -396,9 +874,9 @@
       position: relative;
       width: 100%;
       height: 14px;
-      margin-top: 6px;
-      border: 1px solid #d0daee;
-      border-radius: 4px;
+      margin-top: 8px;
+      border: 1px solid var(--control-border);
+      border-radius: 999px;
       cursor: ew-resize;
       background: linear-gradient(
         to right,
@@ -429,44 +907,72 @@
       position: fixed;
       right: max(14px, var(--safe-right));
       bottom: max(14px, var(--safe-bottom));
-      z-index: 25;
+      z-index: 30;
       width: 220px;
-      border-radius: 14px;
-      border: 1px solid #dbe2f1;
-      background: rgba(255, 255, 255, 0.92);
-      box-shadow: 0 10px 24px rgba(17, 24, 39, 0.14);
+      border-radius: var(--radius-md);
+      border: 1px solid var(--chrome-border);
+      background: var(--chrome-bg);
+      box-shadow: var(--chrome-shadow-sm);
       overflow: hidden;
-      backdrop-filter: blur(6px);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+      transition: opacity 160ms var(--ease), transform 160ms var(--ease);
     }
 
     #miniMap {
       width: 100%;
       height: 130px;
       display: block;
-      background: #f9fbff;
+      background: color-mix(in srgb, var(--control-bg) 60%, transparent);
       cursor: grab;
     }
 
     .zoom-row {
       display: grid;
       grid-template-columns: 36px 1fr 36px;
-      border-top: 1px solid #dbe2f1;
+      border-top: 1px solid var(--chrome-border);
     }
 
     .zoom-btn,
     .zoom-center {
       border: 0;
-      background: #fff;
+      background: transparent;
       height: 36px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       font-size: 14px;
-      color: #334155;
+      font-weight: 600;
+      color: var(--ink-soft);
+      transition: background-color 140ms var(--ease), color 140ms var(--ease);
     }
 
     .zoom-btn:hover {
-      background: #edf2ff;
+      background: var(--control-bg-hover);
+      color: var(--accent-hover);
+    }
+
+    .mini-collapse-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 1;
+      width: 22px;
+      height: 22px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(20, 20, 43, 0.08);
+      color: var(--ink-soft);
+      font-size: 11px;
+      line-height: 1;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      transition: transform 160ms var(--ease);
+    }
+
+    .mini-wrap.is-collapsed .mini-collapse-btn {
+      transform: rotate(180deg);
     }
 
     #hiddenImageInput {
@@ -480,81 +986,122 @@
       resize: none;
       box-sizing: border-box;
       padding: 14px;
-      border: 2px solid #0d6efd;
-      border-radius: 12px;
-      background: transparent;
+      border: none;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.55);
+      box-shadow: 0 0 0 2px var(--accent), var(--chrome-shadow-sm);
       color: #1f2937;
       font-family: "Montserrat", "Segoe UI", sans-serif;
       font-weight: 500;
       line-height: 1.3;
+      text-align: center;
       outline: none;
     }
 
+    /* --- Responsive ------------------------------------------------------
+       Two breakpoints: <=768px (tablet/large phone - toolbar compacts into a
+       "more" overflow menu) and <=480px (phone - chrome hugs the edges and
+       the minimap can be collapsed to reclaim canvas space). */
     @media (max-width: 768px) {
       :root {
-        --toolbar-top: 8px;
+        --toolbar-top: 10px;
       }
 
       .floating-toolbar {
         width: auto;
         max-width: calc(100vw - 2 * var(--safe-left));
-        border-radius: 14px;
-        padding: 6px;
-        gap: 5px;
-        justify-content: center;
+        border-radius: var(--radius-md);
+        padding: 5px;
+        gap: 3px;
+        justify-content: flex-start;
         flex-wrap: nowrap;
       }
 
-      .desktop-only {
-        display: none !important;
-      }
-
-      .mobile-only {
-        display: inline-flex !important;
-      }
-
       .mini-wrap {
-        width: 170px;
+        width: 150px;
         right: 8px;
         bottom: 8px;
       }
 
       #miniMap {
-        height: 96px;
+        height: 84px;
+      }
+
+      .mini-collapse-btn {
+        display: inline-flex;
+      }
+
+      .mini-wrap.is-collapsed #miniMap,
+      .mini-wrap.is-collapsed .zoom-row {
+        display: none;
+      }
+
+      .mini-wrap.is-collapsed {
+        width: auto;
+      }
+
+      .mini-wrap.is-collapsed .mini-collapse-btn {
+        position: static;
+        width: 40px;
+        height: 40px;
+        border-radius: var(--radius-md);
+        background: transparent;
       }
 
       .tool-btn {
-        width: 36px;
-        height: 36px;
-        border-radius: 9px;
+        width: 38px;
+        height: 38px;
+        border-radius: var(--radius-sm);
       }
 
       .tool-btn .bi-local {
-        width: 16px;
-        height: 16px;
+        width: 17px;
+        height: 17px;
       }
 
       .undo-redo-dock {
         left: max(8px, var(--safe-left));
         bottom: max(8px, var(--safe-bottom));
-        padding: 6px;
+        padding: 5px;
       }
 
       .zoom-btn,
       .zoom-center {
-        height: 38px;
+        height: 40px;
+      }
+
+      .floating-panel {
+        width: min(232px, calc(100vw - 24px));
+      }
+
+      #boardNotice {
+        max-width: calc(100vw - 32px);
+        font-size: 12.5px;
       }
     }
 
-    @media (max-width: 430px) {
+    @media (max-width: 480px) {
       .floating-toolbar {
-        top: 6px;
+        top: max(8px, var(--safe-top));
         width: calc(100vw - 2 * var(--safe-left));
         max-width: calc(100vw - 2 * var(--safe-left));
       }
 
-      .mini-wrap {
-        width: 156px;
+      #boardNotice {
+        top: max(calc(var(--toolbar-top) + 50px), var(--safe-top));
+        min-width: 0;
+        width: calc(100vw - 32px);
+        border-radius: 14px;
+      }
+    }
+
+    /* Coarse-pointer/touch devices: keep every hit target comfortably tappable
+       regardless of viewport width (a small tablet in landscape still counts
+       as touch, so this is separate from the width breakpoints above). */
+    @media (pointer: coarse) {
+      .tool-btn, .zoom-btn, .zoom-center, .shape-btn {
+        min-width: 40px;
+        min-height: 40px;
       }
     }
   </style>
@@ -574,22 +1121,19 @@
     <div id="cursorLayer"></div>
   </div>
   <div id="boardNotice" aria-live="polite"></div>
-  <button class="tool-btn selection-lock-btn" id="selectionLockBtn" title="Блокировать выделение" type="button"><span class="bi-local" style="--icon:url('/static/icons/lock.svg')"></span></button>
 
   <div class="floating-toolbar" id="toolbar">
     <button class="tool-btn active" data-tool="select" title="Курсор"><span class="bi-local" style="--icon:url('/static/icons/cursor.svg')"></span></button>
     <button class="tool-btn" data-tool="hand" title="Ладошка"><span class="bi-local" style="--icon:url('/static/icons/hand-index.svg')"></span></button>
     <button class="tool-btn" data-tool="pencil" id="pencilTool" title="Карандаш"><span class="bi-local" style="--icon:url('/static/icons/pencil.svg')"></span></button>
     <button class="tool-btn" data-tool="shape" id="shapeTool" title="Фигуры"><span class="bi-local" style="--icon:url('/static/icons/diamond.svg')"></span></button>
+    <button class="tool-btn" id="stickerTool" title="Стикер"><span class="bi-local" style="--icon:url('/static/icons/sticky-note.svg')"></span></button>
     <button class="tool-btn" data-tool="text" id="textTool" title="Текст"><span class="bi-local" style="--icon:url('/static/icons/type.svg')"></span></button>
     <button class="tool-btn" data-tool="eraser" title="Ластик"><span class="bi-local" style="--icon:url('/static/icons/eraser.svg')"></span></button>
-    <button class="tool-btn desktop-only" id="imageTool" title="Изображение"><span class="bi-local" style="--icon:url('/static/icons/image.svg')"></span></button>
-    <button class="tool-btn desktop-only" id="rotateBtn" title="Повернуть на 15°" disabled><span class="bi-local" style="--icon:url('/static/icons/arrow-repeat.svg')"></span></button>
-    <button class="tool-btn desktop-only" id="bgBtn" title="Фон"><span class="bi-local" style="--icon:url('/static/icons/grid-3x3-gap-fill.svg')"></span></button>
-    <button class="tool-btn desktop-only" id="miroImportBtn" title="Импорт из Miro"><span class="bi-local" style="--icon:url('/static/icons/cloud-download.svg')"></span></button>
-    <button class="tool-btn desktop-only" id="clearBtn" title="Очистить" style="display:none;"><span class="bi-local" style="--icon:url('/static/icons/trash3.svg')"></span></button>
-
-    <button class="tool-btn mobile-only" id="mobileMoreBtn" title="Еще"><span class="bi-local" style="--icon:url('/static/icons/caret-down-fill.svg')"></span></button>
+    <button class="tool-btn" id="imageTool" title="Изображение"><span class="bi-local" style="--icon:url('/static/icons/image.svg')"></span></button>
+    <button class="tool-btn" id="bgBtn" title="Фон"><span class="bi-local" style="--icon:url('/static/icons/grid-3x3-gap-fill.svg')"></span></button>
+    <button class="tool-btn" id="miroImportBtn" title="Импорт из Miro"><span class="bi-local" style="--icon:url('/static/icons/cloud-download.svg')"></span></button>
+    <button class="tool-btn" id="clearBtn" title="Очистить" style="display:none;"><span class="bi-local" style="--icon:url('/static/icons/trash3.svg')"></span></button>
   </div>
 
   <div class="undo-redo-dock" id="undoRedoDock">
@@ -625,38 +1169,43 @@
       <button class="shape-btn active" data-shape="arrow" type="button"><span class="shape-arrow-glyph">↗</span></button>
       <button class="shape-btn" data-shape="triangle" type="button"><span class="bi-local" style="--icon:url('/static/icons/triangle.svg')"></span></button>
       <button class="shape-btn" data-shape="diamond" type="button"><span class="bi-local" style="--icon:url('/static/icons/diamond.svg')"></span></button>
-      <button class="shape-btn" data-shape="sticker" type="button" title="Стикер"><span class="bi-local" style="--icon:url('/static/icons/sticky-note.svg')"></span></button>
     </div>
   </div>
 
-  <div class="floating-panel" id="stylePanel" style="left:12px; bottom:12px; top:auto;">
-    <div id="selectionColorRow">
-      <label class="form-label small mb-1 d-block">Цвет</label>
-      <div class="palette" id="selectionPalette"></div>
-    </div>
-    <div id="selectionStrokeWidthRow">
-      <label class="form-label small mb-1 d-block">Толщина</label>
-      <input id="selectionStrokeWidth" class="form-range w-100" type="range" min="1" max="32" value="2">
-    </div>
-    <div id="cornerRadiusRow">
-      <label class="form-label small mb-1 d-block">Радиус закругления</label>
-      <input id="cornerRadius" class="form-range w-100" type="range" min="0" max="80" value="0">
-    </div>
-    <button type="button" id="deleteSelectionBtn" class="btn btn-outline-danger btn-sm w-100 mt-1">Удалить</button>
+  <!-- Mini contextual toolbar: floats directly above the current selection
+       (see placeSelectionToolbar in board.js), Miro-style - just icons, no
+       labels; each control that needs more than a click opens a small
+       popover right below its own button. -->
+  <div class="sel-toolbar" id="selectionToolbar">
+    <button class="sel-btn" id="selColorBtn" type="button" title="Цвет"><span class="sel-swatch-dot" id="selColorDot"></span></button>
+    <button class="sel-btn" id="selFillBtn" type="button" title="Заливка"><span class="bi-local" style="--icon:url('/static/icons/paint-bucket.svg')"></span></button>
+    <button class="sel-btn" id="selStrokeBtn" type="button" title="Толщина линии"><span class="bi-local" style="--icon:url('/static/icons/slash-lg.svg')"></span></button>
+    <button class="sel-btn" id="selCornerBtn" type="button" title="Радиус закругления"><span class="bi-local" style="--icon:url('/static/icons/rounded_corner.svg')"></span></button>
+    <button class="sel-btn" id="selLockBtn" type="button" title="Заблокировать"><span class="bi-local" id="selLockIcon" style="--icon:url('/static/icons/lock-outline.svg')"></span></button>
+    <button class="sel-btn" id="selRotateBtn" type="button" title="Повернуть на 15°"><span class="bi-local" style="--icon:url('/static/icons/arrow-repeat.svg')"></span></button>
+    <span class="sel-toolbar-sep" id="selDeleteSep"></span>
+    <button class="sel-btn sel-btn-danger" id="selDeleteBtn" type="button" title="Удалить"><span class="bi-local" style="--icon:url('/static/icons/trash3.svg')"></span></button>
+  </div>
+
+  <div class="sel-popover" id="selColorPopover">
+    <div class="palette" id="selectionPalette"></div>
+  </div>
+  <div class="sel-popover" id="selFillPopover">
+    <div class="palette" id="selectionFillPalette"></div>
+  </div>
+  <div class="sel-popover sel-popover-slider" id="selStrokePopover">
+    <input id="selectionStrokeWidth" class="form-range w-100" type="range" min="1" max="32" value="2">
+  </div>
+  <div class="sel-popover sel-popover-slider" id="selCornerPopover">
+    <input id="cornerRadius" class="form-range w-100" type="range" min="0" max="80" value="0">
   </div>
 
   <textarea id="stickerEditOverlay" spellcheck="false"></textarea>
 
-  <div class="floating-panel" id="mobileMorePanel">
-    <div class="shape-grid">
-      <button class="shape-btn" id="mobileImageBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/image.svg')"></span></button>
-      <button class="shape-btn" id="mobileRotateBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/arrow-repeat.svg')"></span></button>
-      <button class="shape-btn" id="mobileBgBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/grid-3x3-gap-fill.svg')"></span></button>
-      <button class="shape-btn" id="mobileClearBtn" type="button"><span class="bi-local" style="--icon:url('/static/icons/trash3.svg')"></span></button>
-    </div>
-  </div>
-
-  <div class="mini-wrap">
+  <div class="mini-wrap" id="miniWrap">
+    <button class="mini-collapse-btn" id="miniCollapseBtn" type="button" title="Свернуть миникарту" aria-label="Свернуть миникарту">
+      <span class="bi-local" style="--icon:url('/static/icons/caret-down-fill.svg')"></span>
+    </button>
     <canvas id="miniMap" width="220" height="130"></canvas>
     <div class="zoom-row">
       <button class="zoom-btn" id="zoomOutBtn">-</button>
@@ -667,8 +1216,66 @@
 
   <input id="hiddenImageInput" type="file" accept="image/*">
 
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal-card" id="confirmModal" role="alertdialog" aria-modal="true">
+      <h3 class="modal-title" id="confirmModalTitle">Очистить доску?</h3>
+      <p class="modal-text" id="confirmModalBody">Это действие нельзя отменить.</p>
+      <div class="modal-actions">
+        <button class="modal-btn" id="confirmModalCancel" type="button">Отмена</button>
+        <button class="modal-btn modal-btn-danger" id="confirmModalOk" type="button">Удалить</button>
+      </div>
+    </div>
+
+    <div class="modal-card" id="miroModal" role="dialog" aria-modal="true">
+      <h3 class="modal-title">Импорт из Miro</h3>
+      <p class="modal-text">Вставьте ссылку на доску Miro (или её ID) и personal access token.</p>
+      <label class="modal-label" for="miroBoardUrlInput">Ссылка или ID доски Miro</label>
+      <input
+        class="modal-input"
+        id="miroBoardUrlInput"
+        type="text"
+        placeholder="https://miro.com/app/board/XXXXXXXXXXX=/"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        data-lpignore="true"
+        data-1p-ignore
+      >
+      <label class="modal-label" for="miroTokenInput">Personal access token</label>
+      <!-- type="text" + text-security masking (not type="password") on
+           purpose: a real password field right below a plain text field is
+           exactly the pattern browsers use to decide "this is a login form"
+           and offer to autofill/save a password into BOTH fields - this
+           isn't a login, just a token to paste into an API request. -->
+      <input
+        class="modal-input modal-input-masked"
+        id="miroTokenInput"
+        type="text"
+        placeholder="Вставьте токен"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        data-lpignore="true"
+        data-1p-ignore
+      >
+      <p class="modal-hint">
+        Токен создаётся в <a href="https://miro.com/app/settings/user-profile/apps" target="_blank" rel="noopener noreferrer">настройках приложений Miro</a> (Settings → Your apps). Он хранится только в этом браузере, на сервер токен передаётся один раз для запроса импорта.
+      </p>
+      <label class="modal-check"><input type="checkbox" id="miroRememberToken" checked> Запомнить токен в этом браузере</label>
+      <div class="modal-status" id="miroModalStatus"></div>
+      <div class="modal-actions">
+        <button class="modal-btn" id="miroModalCancel" type="button">Отмена</button>
+        <button class="modal-btn modal-btn-primary" id="miroModalOk" type="button">
+          <span id="miroModalOkLabel">Импортировать</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260501-01"></script>
+  <script src="/static/board.js?v=20260718-01"></script>
 </body>
 </html>

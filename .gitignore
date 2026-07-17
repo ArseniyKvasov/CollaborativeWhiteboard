@@ -9,7 +9,9 @@ __pycache__/
 .env
 .env.production
 
-app/boards.db
+*.db
+*.db-shm
+*.db-wal
 /data/
 app/uploads/
 

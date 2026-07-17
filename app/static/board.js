@@ -2930,6 +2930,12 @@
       textAlign: "center",
       originX: "center",
       originY: "center",
+      // Without this, Fabric only wraps at spaces and lets a word longer
+      // than the box just overflow past the edge - matches the overlay
+      // textarea's own word-break:break-word (see #stickerEditOverlay CSS)
+      // and the measurement probe in measureStickerTextHeight, which
+      // already assumed this.
+      splitByGrapheme: true,
     });
     const group = new fabric.Group([rect, textbox], {
       subTargetCheck: false,

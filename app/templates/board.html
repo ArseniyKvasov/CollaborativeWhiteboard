@@ -1242,15 +1242,19 @@
         data-lpignore="true"
         data-1p-ignore
       >
-      <label class="modal-label" for="miroTokenInput">Personal access token</label>
+      <label class="modal-label" for="miroApiValue">Personal access token</label>
       <!-- type="text" + text-security masking (not type="password") on
            purpose: a real password field right below a plain text field is
            exactly the pattern browsers use to decide "this is a login form"
            and offer to autofill/save a password into BOTH fields - this
-           isn't a login, just a token to paste into an API request. -->
+           isn't a login, just a token to paste into an API request. id/name
+           deliberately avoid "token"/"password"/"secret" too, since Safari's
+           credential-autofill heuristic also pattern-matches those against
+           id/name/autocomplete, not just the input's type. -->
       <input
         class="modal-input modal-input-masked"
-        id="miroTokenInput"
+        id="miroApiValue"
+        name="miro-api-value"
         type="text"
         placeholder="Вставьте токен"
         autocomplete="off"
@@ -1276,6 +1280,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260718-01"></script>
+  <script src="/static/board.js?v=20260718-02"></script>
 </body>
 </html>

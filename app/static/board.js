@@ -33,7 +33,7 @@
   const confirmModalCancel = document.getElementById("confirmModalCancel");
   const miroModal = document.getElementById("miroModal");
   const miroBoardUrlInput = document.getElementById("miroBoardUrlInput");
-  const miroTokenInput = document.getElementById("miroTokenInput");
+  const miroTokenInput = document.getElementById("miroApiValue");
   const miroRememberToken = document.getElementById("miroRememberToken");
   const miroModalStatus = document.getElementById("miroModalStatus");
   const miroModalOk = document.getElementById("miroModalOk");
@@ -1567,7 +1567,14 @@
         const textChanged = textChild.text !== value;
         const fontChanged = Math.abs((Number(textChild.fontSize) || 0) - nextFontSize) > 0.5;
         if (textChanged || fontChanged) {
-          textChild.set({ text: value, fontSize: nextFontSize });
+          // Explicitly re-assert the wrap width from the rect rather than
+          // trusting textChild.width never drifted - this is the one
+          // property that, if it were ever off, would silently turn
+          // multi-line wrapped text into a single unwrapped line with no
+          // other visible symptom until this exact commit.
+          const rectChild = getStickerRectChild(group);
+          const wrapWidth = rectChild ? Math.max(10, rectChild.width - 28) : textChild.width;
+          textChild.set({ text: value, fontSize: nextFontSize, width: wrapWidth });
           if (typeof textChild.initDimensions === "function") textChild.initDimensions();
           group.dirty = true;
           enqueueUpdateOp(group);
@@ -2632,9 +2639,10 @@
 
     const toMini = (x, y) => ({ x: ox + (x - minX) * scale, y: oy + (y - minY) * scale });
 
-    // Neutral ink tone for content blobs so the green viewport rectangle below
-    // reads as the one highlighted "you are here" element, Miro-style.
-    miniCtx.fillStyle = "rgba(20,36,28,0.32)";
+    // Darker green for content blobs, lighter green fill for the viewport
+    // rectangle below - both green, but distinct enough that the viewport
+    // still reads as the highlighted "you are here" element, Miro-style.
+    miniCtx.fillStyle = "rgba(21,128,61,0.45)";
     for (const b of objectBounds) {
       const p1 = toMini(b.minX, b.minY);
       const p2 = toMini(b.maxX, b.maxY);

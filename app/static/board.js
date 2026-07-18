@@ -1381,12 +1381,6 @@
     });
   }
 
-  function getSelectionObjects() {
-    const active = fabricCanvas.getActiveObject();
-    if (!active) return [];
-    const isMulti = isMultiSelectionObject(active);
-    return isMulti ? active.getObjects() : [active];
-  }
 
   function isMultiSelectionObject(obj) {
     return !!(
@@ -1574,7 +1568,12 @@
           // other visible symptom until this exact commit.
           const rectChild = getStickerRectChild(group);
           const wrapWidth = rectChild ? Math.max(10, rectChild.width - 28) : textChild.width;
-          textChild.set({ text: value, fontSize: nextFontSize, width: wrapWidth });
+          // Also re-assert splitByGrapheme here (not just at creation in
+          // createStickerGroup) so a sticker created before this property
+          // existed picks it up the next time its text is edited, instead
+          // of staying stuck with the old overflow-past-the-edge behavior
+          // for its whole lifetime.
+          textChild.set({ text: value, fontSize: nextFontSize, width: wrapWidth, splitByGrapheme: true });
           if (typeof textChild.initDimensions === "function") textChild.initDimensions();
           group.dirty = true;
           enqueueUpdateOp(group);
@@ -1864,9 +1863,15 @@
       }
     };
 
-    if (isMultiSelectionObject(active)) {
+    if (isActiveSelectionObject(active)) {
       active.getObjects().forEach(applyOne);
     } else {
+      // applyOne already handles a single grouped object (arrow/sticker) by
+      // iterating its own children internally - the old isMultiSelectionObject
+      // check here treated ANY object with getObjects() (including a lone
+      // sticker) as a multi-selection, which fed its rect/textbox children
+      // into enqueueSelectionUpdates as independent top-level objects instead
+      // of the group, corrupting the sticker into two loose synced objects.
       applyOne(active);
     }
 
@@ -1947,7 +1952,7 @@
   function captureActiveSelectionIds() {
     const active = fabricCanvas.getActiveObject();
     if (!active) return [];
-    if (isMultiSelectionObject(active) && typeof active.getObjects === "function") {
+    if (isActiveSelectionObject(active)) {
       return active.getObjects().map((o) => o && o.obj_id).filter(Boolean);
     }
     return active.obj_id ? [active.obj_id] : [];
@@ -2017,7 +2022,7 @@
   }
 
   function enqueueSelectionUpdates() {
-    const objects = getSelectionObjects();
+    const objects = getPanelSelectionObjects();
     if (!objects.length) return;
     enqueueOps(
       objects
@@ -2064,7 +2069,7 @@
   }
 
   function copyActiveSelection() {
-    let objects = getSelectionObjects().filter((obj) => isSyncableObject(obj) && !obj._isDraft);
+    let objects = getPanelSelectionObjects().filter((obj) => isSyncableObject(obj) && !obj._isDraft);
     if (!objects.length && focusedLockedObject && isObjectOnCanvas(focusedLockedObject) && isSyncableObject(focusedLockedObject)) {
       objects = [focusedLockedObject];
     }
@@ -3406,12 +3411,19 @@
       const applyOne = (obj) => {
         if (obj && obj.type === "image") applyImageCornerRadius(obj, getObjectCornerRadius(obj));
       };
-      if (isMultiSelectionObject(target) && typeof target.getObjects === "function") {
+      if (isActiveSelectionObject(target)) {
         // Was one socket.emit per object (emitUpdateOpImmediate in a loop) -
         // dragging a 20-object selection meant 20 separate WebSocket frames
         // and 20 separate server-side history/DB writes for what is, from
         // the user's perspective, a single move. Collect them into one
         // batch_update instead, same as every other multi-op path already does.
+        // isActiveSelectionObject (not the old isMultiSelectionObject, which
+        // matched ANY object with getObjects() - including a single sticker
+        // or arrow group) - that false positive fed a dragged/resized/
+        // rotated sticker's rect+textbox children into this branch as
+        // independent top-level update ops instead of the group itself,
+        // syncing them to every client as two loose objects sitting on top
+        // of the real sticker.
         const ops = [];
         target.getObjects().forEach((obj) => {
           if (!obj) return;

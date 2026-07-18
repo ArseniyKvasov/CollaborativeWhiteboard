@@ -96,6 +96,127 @@
   const STICKER_MIN_SIZE = 100;
   const STICKER_DEFAULT_FONT_SIZE = 18;
   const STICKER_MIN_FONT_SIZE = 10;
+  const STICKER_TEXT_PAD = 14;
+  const STICKER_LINE_HEIGHT_RATIO = 1.3;
+  const STICKER_FONT_FAMILY = "Montserrat, 'Segoe UI', sans-serif";
+
+  // Wraps text the same way the CSS overlay does (word-wrap, breaking only a
+  // single word too long to fit its own line) using real canvas text
+  // measurement, so the final render matches what the user saw while typing.
+  function wrapStickyNoteLines(ctx, text, fontPx, maxWidth) {
+    ctx.font = `500 ${fontPx}px ${STICKER_FONT_FAMILY}`;
+    const breakLongWord = (word) => {
+      const chars = Array.from(word);
+      const out = [];
+      let current = "";
+      chars.forEach((ch) => {
+        const candidate = current + ch;
+        if (current && ctx.measureText(candidate).width > maxWidth) {
+          out.push(current);
+          current = ch;
+        } else {
+          current = candidate;
+        }
+      });
+      if (current) out.push(current);
+      return out.length ? out : [""];
+    };
+    const lines = [];
+    String(text == null ? "" : text).split("\n").forEach((para) => {
+      if (!para) {
+        lines.push("");
+        return;
+      }
+      let current = "";
+      para.split(" ").forEach((word) => {
+        if (ctx.measureText(word).width > maxWidth) {
+          if (current) {
+            lines.push(current);
+            current = "";
+          }
+          const broken = breakLongWord(word);
+          broken.slice(0, -1).forEach((l) => lines.push(l));
+          current = broken[broken.length - 1] || "";
+          return;
+        }
+        const candidate = current ? `${current} ${word}` : word;
+        if (current && ctx.measureText(candidate).width > maxWidth) {
+          lines.push(current);
+          current = word;
+        } else {
+          current = candidate;
+        }
+      });
+      lines.push(current);
+    });
+    return lines;
+  }
+
+  // Single-object sticky note (replaces the old fabric.Group(Rect, Textbox)
+  // pair). Extending Rect means resize/hit-testing/serialization are all
+  // Rect's own well-tested behavior for free, and - critically - a real
+  // single object can never be misidentified as a multi-selection by
+  // isActiveSelectionObject()/getObjects()-based checks the way a Group
+  // could, which is exactly what let a dragged/resized sticker's rect and
+  // text leak onto the board as two independent synced objects. Text is
+  // drawn fresh via ctx.fillText on every render (see _renderNoteText)
+  // rather than living in a child object.
+  class StickyNote extends fabric.Rect {
+    static type = "StickyNote";
+
+    static ownDefaults = {
+      noteText: "",
+      noteFontSize: STICKER_DEFAULT_FONT_SIZE,
+      noteTextColor: "#1f2937",
+      shapeKind: "sticker",
+      rx: 12,
+      ry: 12,
+      stroke: "rgba(15,23,42,0.14)",
+      strokeWidth: 1,
+      lockUniScaling: true,
+      lockScalingFlip: true,
+    };
+
+    static getDefaults() {
+      return { ...super.getDefaults(), ...StickyNote.ownDefaults };
+    }
+
+    constructor(options) {
+      super();
+      Object.assign(this, StickyNote.ownDefaults);
+      this.setOptions(options);
+    }
+
+    toObject(propertiesToInclude = []) {
+      return super.toObject(["noteText", "noteFontSize", "noteTextColor", "shapeKind", ...propertiesToInclude]);
+    }
+
+    _render(ctx) {
+      super._render(ctx);
+      this._renderNoteText(ctx);
+    }
+
+    _renderNoteText(ctx) {
+      const maxWidth = Math.max(1, this.width - STICKER_TEXT_PAD * 2);
+      const fontPx = Number(this.noteFontSize) || STICKER_DEFAULT_FONT_SIZE;
+      const lineHeight = fontPx * STICKER_LINE_HEIGHT_RATIO;
+      const lines = wrapStickyNoteLines(ctx, this.noteText, fontPx, maxWidth);
+      ctx.save();
+      ctx.font = `500 ${fontPx}px ${STICKER_FONT_FAMILY}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = this.noteTextColor || "#1f2937";
+      const totalHeight = lines.length * lineHeight;
+      let y = -this.height / 2 + Math.max(STICKER_TEXT_PAD, (this.height - totalHeight) / 2) + lineHeight / 2;
+      lines.forEach((line) => {
+        ctx.fillText(line, 0, y);
+        y += lineHeight;
+      });
+      ctx.restore();
+    }
+  }
+  fabric.classRegistry.setClass(StickyNote);
+
   const cursorColors = ["#e5484d", "#2563eb", "#0d9488", "#ea580c", "#0891b2", "#c026d3", "#b8790a", "#7c3aed"];
   const GRID_WORLD_SIZE = 24;
   // Dot grid (not lines) - reads as lighter/more premium at a glance, matches
@@ -390,19 +511,22 @@
 
   function isNoMirrorObject(obj) {
     if (!obj) return false;
-    return isTextObject(obj) || String(obj.type || "").toLowerCase() === "image";
+    // Stickers draw their own text via ctx.fillText inside _render (see the
+    // StickyNote class) rather than a separate child object - if the note
+    // itself ever ended up flipped, the text would render mirrored right
+    // along with it, so it needs the same flip-prevention text/images get.
+    return isTextObject(obj) || isStickerObject(obj) || String(obj.type || "").toLowerCase() === "image";
   }
 
   function isUniformScaleObject(obj) {
-    // Stickers aren't a "no mirror" object (that's about text/images looking
-    // wrong flipped), but a sticker's scaleX/scaleY must stay locked together
-    // too - it's a Group, so non-uniform scaling stretches the text child
-    // horizontally or vertically instead of just resizing the note, which is
-    // exactly the "text randomly compresses" resize bug this guards against.
+    // isNoMirrorObject already covers stickers (see above) - a sticker's
+    // scaleX/scaleY must stay locked together so its text (drawn fresh via
+    // ctx.fillText on every render, using the note's current width/height)
+    // doesn't get stretched by a non-uniform canvas transform.
     // applySelectionStyles() re-derives lockUniScaling from this check every
-    // time an object is (re)selected, which was silently overriding the
+    // time an object is (re)selected, which previously silently overrode the
     // lockUniScaling:true set at sticker creation time.
-    return isNoMirrorObject(obj) || isStickerObject(obj);
+    return isNoMirrorObject(obj);
   }
 
   function enforceNoMirrorObject(obj) {
@@ -1418,21 +1542,11 @@
   }
 
   function isStickerObject(obj) {
-    return !!(obj && obj.type === "group" && obj.shapeKind === "sticker");
+    return !!(obj && obj.type === "stickynote");
   }
 
   function isArrowGroupObject(obj) {
-    return !!(obj && obj.type === "group" && !isStickerObject(obj));
-  }
-
-  function getStickerRectChild(group) {
-    if (!group || typeof group.getObjects !== "function") return null;
-    return group.getObjects().find((o) => o && o.type === "rect") || null;
-  }
-
-  function getStickerTextChild(group) {
-    if (!group || typeof group.getObjects !== "function") return null;
-    return group.getObjects().find((o) => o && o.type === "textbox") || null;
+    return !!(obj && obj.type === "group");
   }
 
   // Editing text inside a Fabric Group doesn't work out of the box - Fabric's
@@ -1499,25 +1613,22 @@
     stickerEditOverlay.style.paddingBottom = `${topPad}px`;
   }
 
-  function enterStickerEditMode(group) {
+  function enterStickerEditMode(note) {
     if (!stickerEditOverlay || !canEdit) return;
-    const textChild = getStickerTextChild(group);
-    if (!textChild) return;
     fabricCanvas.discardActiveObject();
-    group.setCoords();
-    const bounds = group.getBoundingRect();
+    note.setCoords();
+    const bounds = note.getBoundingRect();
     const canvasRect = canvasEl.getBoundingClientRect();
     const topLeft = screenFromWorld(bounds.left, bounds.top);
     const bottomRight = screenFromWorld(bounds.left + bounds.width, bounds.top + bounds.height);
-    // getBoundingRect() bakes the group's own scaleX/scaleY into its width/
+    // getBoundingRect() bakes the note's own scaleX/scaleY into its width/
     // height already, but not the viewport zoom - convert both corners
     // through the viewport transform so the overlay box (and the font-size
     // below) match what's actually rendered on screen at any zoom level.
     const zoom = fabricCanvas.getZoom();
-    const displayScale = (Number(group.scaleX) || 1) * zoom;
+    const displayScale = (Number(note.scaleX) || 1) * zoom;
 
-    const rectChild = getStickerRectChild(group);
-    stickerEditOverlay.value = textChild.text || "";
+    stickerEditOverlay.value = note.noteText || "";
     stickerEditOverlay.style.left = `${canvasRect.left + topLeft.x}px`;
     stickerEditOverlay.style.top = `${canvasRect.top + topLeft.y}px`;
     stickerEditOverlay.style.width = `${bottomRight.x - topLeft.x}px`;
@@ -1526,11 +1637,11 @@
     // Match the sticker's own fill so the editing textarea reads as "the
     // sticker itself, now editable" rather than a generic input box floating
     // over a gap where the note briefly disappeared.
-    stickerEditOverlay.style.background = (rectChild && rectChild.fill) || "#fef08a";
+    stickerEditOverlay.style.background = note.fill || "#fef08a";
     stickerEditOverlay.style.display = "block";
-    stickerEditOverlay.dataset.targetObjId = group.obj_id || "";
+    stickerEditOverlay.dataset.targetObjId = note.obj_id || "";
 
-    group.set({ opacity: 0 });
+    note.set({ opacity: 0 });
     fabricCanvas.requestRenderAll();
     fitStickerOverlayFont();
     requestAnimationFrame(() => {
@@ -1548,36 +1659,20 @@
     stickerEditOverlay.style.display = "none";
     stickerEditOverlay.dataset.targetObjId = "";
 
-    const group = objId ? findObjectById(objId) : null;
-    if (!group) return;
-    group.set({ opacity: 1 });
+    const note = objId ? findObjectById(objId) : null;
+    if (!note) return;
+    note.set({ opacity: 1 });
     if (commit) {
-      const textChild = getStickerTextChild(group);
-      if (textChild) {
-        // Store the font size back in the sticker's own (unscaled, un-zoomed)
-        // units so it renders at the same visual size next time, regardless
-        // of the zoom level or group scale in effect while editing.
-        const nextFontSize = Math.max(STICKER_MIN_FONT_SIZE, fittedFontPx / displayScale);
-        const textChanged = textChild.text !== value;
-        const fontChanged = Math.abs((Number(textChild.fontSize) || 0) - nextFontSize) > 0.5;
-        if (textChanged || fontChanged) {
-          // Explicitly re-assert the wrap width from the rect rather than
-          // trusting textChild.width never drifted - this is the one
-          // property that, if it were ever off, would silently turn
-          // multi-line wrapped text into a single unwrapped line with no
-          // other visible symptom until this exact commit.
-          const rectChild = getStickerRectChild(group);
-          const wrapWidth = rectChild ? Math.max(10, rectChild.width - 28) : textChild.width;
-          // Also re-assert splitByGrapheme here (not just at creation in
-          // createStickerGroup) so a sticker created before this property
-          // existed picks it up the next time its text is edited, instead
-          // of staying stuck with the old overflow-past-the-edge behavior
-          // for its whole lifetime.
-          textChild.set({ text: value, fontSize: nextFontSize, width: wrapWidth, splitByGrapheme: true });
-          if (typeof textChild.initDimensions === "function") textChild.initDimensions();
-          group.dirty = true;
-          enqueueUpdateOp(group);
-        }
+      // Store the font size back in the sticker's own (unscaled, un-zoomed)
+      // units so it renders at the same visual size next time, regardless of
+      // the zoom level or scale in effect while editing.
+      const nextFontSize = Math.max(STICKER_MIN_FONT_SIZE, fittedFontPx / displayScale);
+      const textChanged = note.noteText !== value;
+      const fontChanged = Math.abs((Number(note.noteFontSize) || 0) - nextFontSize) > 0.5;
+      if (textChanged || fontChanged) {
+        note.set({ noteText: value, noteFontSize: nextFontSize });
+        note.dirty = true;
+        enqueueUpdateOp(note);
       }
     }
     fabricCanvas.requestRenderAll();
@@ -1602,8 +1697,7 @@
     if (!obj) return paletteColors[0];
     if (obj.type === "i-text") return obj.fill || paletteColors[0];
     if (isStickerObject(obj)) {
-      const rect = getStickerRectChild(obj);
-      return (rect && rect.fill) || STICKER_COLORS[0];
+      return obj.fill || STICKER_COLORS[0];
     }
     if (isArrowGroupObject(obj) && typeof obj.getObjects === "function") {
       const child = obj.getObjects().find((c) => c && c.stroke);
@@ -1628,8 +1722,7 @@
       return true;
     }
     if (isStickerObject(obj)) {
-      const rect = getStickerRectChild(obj);
-      if (rect) rect.set({ fill: color });
+      obj.set({ fill: color });
       obj.dirty = true;
       return true;
     }
@@ -2901,55 +2994,20 @@
     updateSelectionToolbar();
   }
 
-  function createStickerGroup(left, top, width, height, color, text, fontSize) {
-    const fillColor = color || currentStickerColor;
-    const pad = 14;
-    // Absolute canvas coordinates for both children, matching how the arrow
-    // shape below builds its group: Fabric derives the group's own bounding
-    // box from the children's absolute positions when left/top aren't passed
-    // in the group options.
-    const rect = new fabric.Rect({
+  function createStickyNote(left, top, width, height, color, text, fontSize) {
+    const note = new StickyNote({
       left,
       top,
       width,
       height,
-      rx: 12,
-      ry: 12,
-      fill: fillColor,
-      stroke: "rgba(15,23,42,0.14)",
-      strokeWidth: 1,
+      fill: color || currentStickerColor,
+      noteText: text || "",
+      noteFontSize: fontSize || STICKER_DEFAULT_FONT_SIZE,
       originX: "left",
       originY: "top",
     });
-    // Centered both ways (Miro-style note text) - originX/Y "center" anchored
-    // to the rect's own center point, rather than the top-left pad offset the
-    // left-aligned version used.
-    const textbox = new fabric.Textbox(text || "", {
-      left: left + width / 2,
-      top: top + height / 2,
-      width: Math.max(10, width - pad * 2),
-      fontSize: fontSize || STICKER_DEFAULT_FONT_SIZE,
-      fontFamily: "Montserrat, sans-serif",
-      fontWeight: "500",
-      fill: "#1f2937",
-      textAlign: "center",
-      originX: "center",
-      originY: "center",
-      // Without this, Fabric only wraps at spaces and lets a word longer
-      // than the box just overflow past the edge - matches the overlay
-      // textarea's own word-break:break-word (see #stickerEditOverlay CSS)
-      // and the measurement probe in measureStickerTextHeight, which
-      // already assumed this.
-      splitByGrapheme: true,
-    });
-    const group = new fabric.Group([rect, textbox], {
-      subTargetCheck: false,
-      lockUniScaling: true,
-      lockScalingFlip: true,
-      shapeKind: "sticker",
-    });
-    ensureObjMeta(group);
-    return group;
+    ensureObjMeta(note);
+    return note;
   }
 
   function createShape(type, start, end) {
@@ -2979,7 +3037,7 @@
         left = x;
         top = y;
       }
-      return createStickerGroup(left, top, w, h);
+      return createStickyNote(left, top, w, h);
     }
 
     if (type === "rect") {

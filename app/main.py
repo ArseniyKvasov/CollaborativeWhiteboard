@@ -1361,43 +1361,12 @@ def _diamond_points(width: float, height: float) -> list[dict[str, float]]:
 
 
 def _build_sticker_object(obj_id: str, user: UserContext, left, top, width, height, color, text) -> dict[str, Any]:
-    pad = 14.0
-    # Fabric Group children are positioned relative to the GROUP'S CENTER,
-    # not in absolute canvas coordinates, regardless of the group's own
-    # originX/Y. Confirmed by inspecting how the client's own arrow-group
-    # serializes: its Line/Polygon children end up with small
-    # center-relative left/top values, not their original absolute points.
-    # Getting this wrong doesn't error - it just silently renders the
-    # children far outside the group's visible bounding box.
-    rect = {
-        "type": "Rect",
-        "left": -width / 2,
-        "top": -height / 2,
-        "width": width,
-        "height": height,
-        "rx": 12,
-        "ry": 12,
-        "fill": color,
-        "stroke": "rgba(15,23,42,0.14)",
-        "strokeWidth": 1,
-        "originX": "left",
-        "originY": "top",
-    }
-    textbox = {
-        "type": "Textbox",
-        "left": -width / 2 + pad,
-        "top": -height / 2 + pad,
-        "width": max(10.0, width - pad * 2),
-        "text": text or "",
-        "fontSize": 18,
-        "fontFamily": "Montserrat, sans-serif",
-        "fontWeight": "500",
-        "fill": "#1f2937",
-        "originX": "left",
-        "originY": "top",
-    }
+    # Matches the client's StickyNote class (app/static/board.js) - a single
+    # Rect-derived object that draws its own text via ctx.fillText, not the
+    # older Group(Rect, Textbox) pair. No child-positioning math needed here
+    # since there are no children.
     return {
-        "type": "Group",
+        "type": "StickyNote",
         "obj_id": obj_id,
         "author_id": user.user_id,
         "author_name": user.username,
@@ -1408,10 +1377,16 @@ def _build_sticker_object(obj_id: str, user: UserContext, left, top, width, heig
         "height": height,
         "originX": "left",
         "originY": "top",
-        "subTargetCheck": False,
+        "rx": 12,
+        "ry": 12,
+        "fill": color,
+        "stroke": "rgba(15,23,42,0.14)",
+        "strokeWidth": 1,
         "lockUniScaling": True,
         "lockScalingFlip": True,
-        "objects": [rect, textbox],
+        "noteText": text or "",
+        "noteFontSize": 18,
+        "noteTextColor": "#1f2937",
     }
 
 

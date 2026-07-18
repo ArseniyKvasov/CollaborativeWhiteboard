@@ -497,7 +497,7 @@
   }
 
   function isLockEligibleObject(obj) {
-    return !!(obj && String(obj.type || "").toLowerCase() === "image");
+    return !!(obj && !isActiveSelectionObject(obj));
   }
 
   function isTextObject(obj) {

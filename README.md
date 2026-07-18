@@ -46,7 +46,18 @@ docker compose up --build
 
 ## Production
 
-1. Проверьте `CORS_ORIGINS` в `.env.production` и укажите домен основного сервиса.
+1. Создайте `.env.production` из шаблона и отредактируйте его:
+
+   ```bash
+   cp .env.example .env.production
+   ```
+
+   Обязательно замените в нём:
+   - `CORS_ORIGINS` — вместо `https://main-service.example.com` укажите реальный домен основного сервиса, который встраивает доску через iframe.
+   - `JWT_SECRET` и `SERVICE_API_KEY` — вместо `change_me_...` сгенерируйте случайные секреты (например, `openssl rand -hex 32`).
+
+   Остальные значения (`DATABASE_URL`, `REDIS_URL`, `UPLOAD_DIR`, `HOST_PORT`, `UVICORN_WORKERS`) уже настроены под сеть `docker-compose.prod.yml` и не требуют изменений для типового однохостового деплоя.
+
 2. Запустите:
 
 ```bash
@@ -90,8 +101,11 @@ REDIS_URL=redis://localhost:6379/0
 Запустите приложение через `uvicorn`:
 
 ```bash
-uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000 --env-file .env
+uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000 --env-file .env \
+  --reload-exclude "app/uploads/*" --reload-exclude "*.db" --reload-exclude "*.db-*"
 ```
+
+`--reload-exclude` здесь обязателен: `boards.db` и `app/uploads/` лежат внутри `app/`, рядом с исходным кодом, и меняются при каждой операции на доске или загрузке картинки. Без исключений `--reload` воспринимает это как изменение кода и перезапускает процесс, обрывая все открытые WebSocket-соединения посреди сессии (в браузере это выглядит как случайные внезапные отключения).
 
 Открыть доску без токена в debug-режиме:
 

@@ -42,7 +42,13 @@ services:
       - "8000:8000"
     volumes:
       - ./:/app
-    command: uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --reload
+    # boards.db and uploads/ live under app/ next to the source - without these
+    # excludes, every board edit or image upload triggers a reload watcher
+    # restart, which kills every open WebSocket mid-session.
+    command: >
+      uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --reload
+      --reload-exclude "app/uploads/*"
+      --reload-exclude "*.db" --reload-exclude "*.db-*"
     depends_on:
       db:
         condition: service_healthy

@@ -138,13 +138,14 @@ celery -A app.celery_app worker --loglevel=info
 - `CORS_ORIGINS` — список origin через запятую
 - `DEBUG` — dev-режим; при `True` JWT не обязателен
 
-Для production используется `.env.production`:
+Для production используется `.env.production` (см. шаблон `.env.example`):
 
 - `DEBUG=False`
 - `HOST_PORT=18743`
-- `DATABASE_URL=/data/boards.db` (persist volume `whiteboard_data`)
+- `DATABASE_URL` — строка подключения к сервису `db` (PostgreSQL) из `docker-compose.prod.yml`, например `postgresql://whiteboard:whiteboard_pass@db:5432/whiteboard`. **Не указывайте здесь путь к SQLite-файлу** — SQLite на Docker volume ловит `attempt to write a readonly database` при пересоздании контейнера или запуске нескольких воркеров одновременно (WAL-режиму нужны права на запись не только в сам файл, но и на директорию рядом с ним). PostgreSQL для этого и поднят как отдельный сервис.
 - `JWT_SECRET` задан
 - `SERVICE_API_KEY` — ключ сервисных admin-операций
+- `UVICORN_WORKERS=1` (по умолчанию) — см. пояснение в `docker-compose.prod.yml` о том, почему больше одного воркера требует sticky sessions на прокси
 
 `HOST_PORT` задает внешний порт хоста для Docker Compose. Внутри контейнера приложение по-прежнему слушает `8000`.
 

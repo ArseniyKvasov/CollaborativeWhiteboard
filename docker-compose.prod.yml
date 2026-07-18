@@ -48,9 +48,28 @@ services:
     volumes:
       - whiteboard_data:/data
     restart: unless-stopped
-    # Now safe to run multiple workers: Socket.IO fan-out, presence and undo/redo
-    # history are all backed by Redis instead of per-process memory.
-    command: uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --proxy-headers --workers ${UVICORN_WORKERS:-2}
+    # Defaults to a single worker on purpose: this is an asyncio/I-O-bound
+    # service (Socket.IO connections, not CPU-bound work - image compression
+    # already runs in the separate celery-worker), so one process comfortably
+    # handles a large number of concurrent connections without the added
+    # complexity below.
+    #
+    # Redis (AsyncRedisManager) only shares pub/sub broadcast between worker
+    # processes - it does NOT share the Engine.IO transport/session state for
+    # a connection that's still mid-handshake (polling before the upgrade to
+    # websocket). If a client's sequential HTTP requests during that handshake
+    # land on different worker processes (which happens by default - uvicorn
+    # workers all bind the same port via SO_REUSEPORT and the kernel picks
+    # one per request), the second worker won't recognize the sid and the
+    # connection dies with 400s. This is a fundamental Socket.IO constraint,
+    # not specific to this app - see python-socketio's scaling docs.
+    #
+    # If you do need more than one worker (CPU-bound load, very high
+    # concurrent connection count), you must pair it with sticky sessions -
+    # e.g. run each worker as its own process on its own port and put an
+    # nginx `upstream` with `ip_hash` in front of them - a single `--workers
+    # N` inside one container/port is not sufficient on its own.
+    command: uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --proxy-headers --workers ${UVICORN_WORKERS:-1}
     depends_on:
       db:
         condition: service_healthy

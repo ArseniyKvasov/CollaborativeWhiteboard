@@ -183,6 +183,15 @@ if IS_POSTGRES and psycopg2 is None:
     print("[DB] Warning: DATABASE_URL points to PostgreSQL, but psycopg2-binary is not installed!")
 
 
+class _PgCursorResult:
+    def __init__(self, cursor, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
 class DbConnectionWrapper:
     def __init__(self, conn, is_postgres: bool):
         self._conn = conn
@@ -213,10 +222,16 @@ class DbConnectionWrapper:
 
             cur = self._conn.cursor(cursor_factory=RealDictCursor)
             cur.execute(sql, params)
+            lastrowid = None
             if is_insert_ops:
                 row = cur.fetchone()
-                cur.lastrowid = row["id"] if row else None
-            return cur
+                lastrowid = row["id"] if row else None
+            # psycopg2 cursors define `lastrowid` as a read-only C-level
+            # property (always None), unlike sqlite3.Cursor where it's a
+            # plain writable attribute - assigning to it directly raises
+            # AttributeError. Wrap the cursor so callers can keep reading
+            # `.lastrowid` the same way regardless of backend.
+            return _PgCursorResult(cur, lastrowid)
         else:
             return self._conn.execute(sql, params)
 

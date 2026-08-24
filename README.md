@@ -357,6 +357,32 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 не восстанавливали, не бэкап. WAL-G/PITR (потеря ≤ пары минут) имеет смысл
 только при соответствующих требованиях; для досок суточный дамп достаточен.
 
+Ротация в S3 включена по умолчанию: при каждом бэкапе удаляются дампы старше
+`BACKUP_S3_RETENTION_DAYS` (30 дней, `0` — выключить). Флаг `--prune-s3 N`
+переопределяет разово; альтернатива — lifecycle-правило в консоли Yandex
+(тогда поставьте `BACKUP_S3_RETENTION_DAYS=0`, чтобы не дублировать).
+
+## Очистка неактивных досок
+
+Доски, которые **не изменялись** `STALE_BOARD_DAYS` дней (по умолчанию 90),
+удаляются еженедельным cron'ом вместе с их медиа (S3-префикс и локальные
+файлы), ops/members (каскад FK) и Redis-кэшем канваса. Критерий — время
+последней правки: просмотры не пишутся в БД принципиально (нет записи на
+каждый connect), поэтому «открыли, но не рисовали 90 дней» = удаляется.
+
+```bash
+# посмотреть, что попадёт под удаление (dry-run, ничего не трогает):
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec whiteboard python scripts/cleanup_stale_boards.py
+
+# еженедельное расписание — воскресенье 04:00:
+(crontab -l 2>/dev/null; echo "0 4 * * 0 cd $PWD && docker compose --env-file .env.production -f docker-compose.prod.yml exec -T whiteboard python scripts/cleanup_stale_boards.py --yes >> /var/log/whiteboard-cleanup.log 2>&1") | crontab -
+```
+
+Порог настраивается через `STALE_BOARD_DAYS` в `.env.production` или флагом
+`--days N`; за один запуск обрабатывается не более `--limit` (500) досок —
+при большом backlog'е скрипт просто догоняет за несколько недель.
+
 ## JWT
 
 Ожидаются claims: `user_id` (обязательно), `exp` (обязательно), `username`

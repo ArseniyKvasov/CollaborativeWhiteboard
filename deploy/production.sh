@@ -264,9 +264,16 @@ cmd_rollback() {
 
 cmd_nginx_install() {
   [[ -n "${WHITEBOARD_DOMAIN:-}" ]] || die "WHITEBOARD_DOMAIN is not set (export it or put it in $ENV_FILE)"
+  # Be forgiving: strip protocol/trailing slash if someone pasted a full URL.
+  local domain="${WHITEBOARD_DOMAIN#https://}"; domain="${domain#http://}"; domain="${domain%/}"
+  [[ "$domain" == *.* ]] || die "WHITEBOARD_DOMAIN='$domain' does not look like a domain (нужен голый домен, например board.fastclass.ru)"
   [[ -f "$NGINX_SITE_TMPL" ]] || die "Template missing: $NGINX_SITE_TMPL"
-  local cert_dir="/etc/letsencrypt/live/$WHITEBOARD_DOMAIN"
-  [[ -d "$cert_dir" ]] || warn "No certs at $cert_dir yet - obtain them with certbot first."
+  local cert_dir="/etc/letsencrypt/live/$domain"
+  if [[ ! -d "$cert_dir" ]]; then
+    warn "No certs at $cert_dir - obtain them first:"
+    warn "  sudo systemctl stop nginx && sudo certbot certonly --standalone -d $domain && sudo systemctl start nginx"
+    die "certbot certificate missing for $domain"
+  fi
 
   sudo tee /etc/nginx/conf.d/websocket-map.conf >/dev/null <<'EOF'
 map $http_upgrade $connection_upgrade {
@@ -276,12 +283,12 @@ map $http_upgrade $connection_upgrade {
 EOF
   switch_upstream "${ACTIVE_SLOT:-a}"
 
-  sed "s/__WHITEBOARD_DOMAIN__/$WHITEBOARD_DOMAIN/g" "$NGINX_SITE_TMPL" \
+  sed "s|__WHITEBOARD_DOMAIN__|$domain|g" "$NGINX_SITE_TMPL" \
     | sudo tee "/etc/nginx/sites-available/$NGINX_SITE_NAME" >/dev/null
   sudo ln -sf "/etc/nginx/sites-available/$NGINX_SITE_NAME" "/etc/nginx/sites-enabled/$NGINX_SITE_NAME"
   sudo nginx -t || die "nginx -t failed - site config NOT applied (см. ошибку выше: обычно отсутствует сертификат или старый nginx)"
   sudo systemctl reload nginx
-  info "nginx installed for $WHITEBOARD_DOMAIN (upstream -> slot ${ACTIVE_SLOT:-a})"
+  info "nginx installed for $domain (upstream -> slot ${ACTIVE_SLOT:-a})"
 }
 
 case "$COMMAND" in

@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from botocore.exceptions import ClientError  # noqa: E402
 from app.media.s3_storage import get_client, object_key, s3_enabled  # noqa: E402
 from app.media.store import CONTENT_TYPES  # noqa: E402
 
@@ -49,6 +50,9 @@ def main() -> int:
               "MEDIA_S3_ACCESS_KEY_ID / MEDIA_S3_SECRET_ACCESS_KEY first.")
         return 2
     client = get_client()
+    if client is None:
+        print("ERROR: S3 client init failed - check MEDIA_S3_* credentials and logs above.")
+        return 2
     bucket = os.getenv("MEDIA_S3_BUCKET")
 
     uploaded = skipped = failed = deleted = 0
@@ -65,7 +69,7 @@ def main() -> int:
         try:
             head = client.head_object(Bucket=bucket, Key=key)
             already = int(head.get("ContentLength") or 0) == size
-        except client.exceptions.ClientError:
+        except ClientError:
             already = False
 
         if already:

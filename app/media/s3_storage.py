@@ -57,7 +57,10 @@ def get_client():
                 aws_secret_access_key=S3_SECRET_ACCESS_KEY,
                 # Path-style addressing - Yandex Object Storage serves both,
                 # but path-style avoids virtual-host DNS surprises.
-                config=BotoConfig(signature_version="s3v4", addressing_style="path"),
+                # NOTE: addressing_style must be nested under s3=... - a bare
+                # Config(addressing_style=...) is a TypeError in botocore.
+                config=BotoConfig(signature_version="s3v4",
+                                  s3={"addressing_style": "path"}),
             )
             logger.info("S3 media client ready: bucket=%s location=%s", S3_BUCKET, S3_LOCATION)
         except Exception:

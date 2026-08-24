@@ -80,23 +80,33 @@ def main() -> int:
 
     s3_failed: set[str] = set()
     if s3_enabled():
-        client = get_client()
-        bucket = os.environ["MEDIA_S3_BUCKET"]
-        for bid in ids:
-            prefix = f"{S3_LOCATION}/{bid}/"
-            try:
-                resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
-                objects = resp.get("Contents", [])
-                if objects:
-                    client.delete_objects(
-                        Bucket=bucket,
-                        Delete={"Objects": [{"Key": o["Key"]} for o in objects[:1000]],
-                                "Quiet": True},
-                    )
-                    print(f"  s3: removed {len(objects)} object(s) under {prefix}")
-            except Exception as exc:  # noqa: BLE001
-                s3_failed.add(bid)
-                print(f"  WARN: s3 cleanup failed for {prefix}: {exc} - board skipped this run")
+        try:
+            client = get_client()
+            if client is None:
+                raise RuntimeError("S3 client init failed (see logs above)")
+            bucket = os.environ["MEDIA_S3_BUCKET"]
+        except Exception as exc:  # noqa: BLE001
+            # Can't touch S3 at all -> defer every board, delete nothing this run.
+            print(f"[cleanup] WARN: S3 unavailable ({exc}) - deferring all boards, "
+                  f"nothing will be deleted this run")
+            s3_failed = set(ids)
+            client = None
+        if client is not None:
+            for bid in ids:
+                prefix = f"{S3_LOCATION}/{bid}/"
+                try:
+                    resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+                    objects = resp.get("Contents", [])
+                    if objects:
+                        client.delete_objects(
+                            Bucket=bucket,
+                            Delete={"Objects": [{"Key": o["Key"]} for o in objects[:1000]],
+                                    "Quiet": True},
+                        )
+                        print(f"  s3: removed {len(objects)} object(s) under {prefix}")
+                except Exception as exc:  # noqa: BLE001
+                    s3_failed.add(bid)
+                    print(f"  WARN: s3 cleanup failed for {prefix}: {exc} - board skipped this run")
 
     deletable = [b for b in ids if b not in s3_failed]
     if s3_failed:

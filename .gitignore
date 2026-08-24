@@ -22,3 +22,7 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# deploy artifacts
+.deploy-state
+backups/

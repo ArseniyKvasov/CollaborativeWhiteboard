@@ -11,4 +11,11 @@ celery_app.conf.update(
     accept_content=["json"],
     result_expires=3600,
     task_track_started=True,
+    # Fair queuing under burst load (e.g. a lecture hall uploading images at
+    # once): one in-flight task per worker child instead of prefetching a long
+    # private backlog, and ack-after-done so a crashed worker re-queues the
+    # image instead of losing it in "processing" forever.
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
 )

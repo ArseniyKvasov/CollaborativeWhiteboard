@@ -28,12 +28,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Redis settings for production stability
+    command: redis-server --requirepass "" --appendonly yes --appendfilename "appendonly.aof"
+    # Uncomment and set REDIS_PASSWORD env var if needed:
+    # environment:
+    #   REDIS_PASSWORD: ${REDIS_PASSWORD}
 
   whiteboard:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: whiteboard-prod
+    # Blue-green deploy: deploy/production.sh runs two slots (a/b) on ports
+    # HOST_PORT_A/HOST_PORT_B, health-checks the new one, flips the nginx
+    # upstream and only then removes the old slot. DEPLOY_SLOT must differ
+    # between the two slots or their container names would collide.
+    container_name: whiteboard-prod-${DEPLOY_SLOT:-a}
     env_file:
       - .env.production
     environment:
@@ -86,7 +95,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: whiteboard-celery-worker-prod
+    container_name: whiteboard-celery-worker-prod-${DEPLOY_SLOT:-a}
     env_file:
       - .env.production
     environment:
@@ -98,7 +107,7 @@ services:
     volumes:
       - whiteboard_data:/data
     restart: unless-stopped
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
     depends_on:
       redis:
         condition: service_healthy

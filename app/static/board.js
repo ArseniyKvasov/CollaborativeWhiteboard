@@ -69,6 +69,8 @@
   const selLockBtn = document.getElementById("selLockBtn");
   const selLockIcon = document.getElementById("selLockIcon");
   const selRotateBtn = document.getElementById("selRotateBtn");
+  const selFrontBtn = document.getElementById("selFrontBtn");
+  const selBackBtn = document.getElementById("selBackBtn");
   const selDeleteBtn = document.getElementById("selDeleteBtn");
   const selDeleteSep = document.getElementById("selDeleteSep");
   const selColorPopover = document.getElementById("selColorPopover");
@@ -742,6 +744,8 @@
     setSelBtnVisible(selCornerBtn, cornerObjs.length > 0);
     setSelBtnVisible(selLockBtn, lockEligible);
     setSelBtnVisible(selRotateBtn, rotateEligible);
+    setSelBtnVisible(selFrontBtn, rotateEligible);
+    setSelBtnVisible(selBackBtn, rotateEligible);
     const hasLeadingIcon = colorObjs.length || fillObjs.length || strokeObjs.length || cornerObjs.length || lockEligible || rotateEligible;
     if (selDeleteSep) selDeleteSep.classList.toggle("is-hidden", !hasLeadingIcon);
 
@@ -2073,6 +2077,92 @@
       fabricCanvas.setActiveObject(selection);
     }
     applySelectionStyles();
+  }
+
+  // --- Z-order (передний/задний план) ---------------------------------------
+  // Restack работает поверх уже существующих примитивов: локально двигаем
+  // объекты в стеке Fabric, восстанавливаем выделение и шлём полный порядок
+  // obj_id снизу вверх. Сервер перезаписывает baseline-canvas (значит порядок
+  // переживает reload), а другим клиентам прилетает событие z_order.
+  const bringToFrontFn = typeof fabricCanvas.bringObjectToFront === "function"
+    ? (o) => fabricCanvas.bringObjectToFront(o)
+    : (o) => fabricCanvas.bringToFront(o);
+  const sendToBackFn = typeof fabricCanvas.sendObjectToBack === "function"
+    ? (o) => fabricCanvas.sendObjectToBack(o)
+    : (o) => fabricCanvas.sendToBack(o);
+
+  function broadcastZOrder() {
+    if (!isSocketConnected) return;
+    const order = fabricCanvas.getObjects()
+      .map((o) => (o && o.obj_id ? String(o.obj_id) : ""))
+      .filter(Boolean);
+    socket.emit("z_order", { board_id: boardId, order });
+  }
+
+  function restackSelection(mode) {
+    if (!canEdit || currentTool !== "select") return;
+    const active = fabricCanvas.getActiveObject();
+    if (!active) return;
+    const targets = isActiveSelectionObject(active)
+      ? active.getObjects().filter((o) => isObjectOnCanvas(o))
+      : (isObjectOnCanvas(active) ? [active] : []);
+    if (!targets.length) return;
+
+    const selectedIds = targets.map((o) => o.obj_id);
+
+    // Дети ActiveSelection вынуты из стека канваса - сначала сбрасываем
+    // выделение, иначе операции порядка до них не доберутся.
+    fabricCanvas.discardActiveObject();
+
+    const orderedTargets = fabricCanvas.getObjects().filter((o) => targets.includes(o));
+    if (mode === "front") {
+      orderedTargets.forEach(bringToFrontFn);
+    } else {
+      orderedTargets.slice().reverse().forEach(sendToBackFn);
+    }
+
+    restoreSelectionByIds(selectedIds);
+    fabricCanvas.requestRenderAll();
+    drawMiniMap();
+    updateSelectionToolbar();
+    broadcastZOrder();
+  }
+
+  function applyZOrder(orderIds) {
+    const byId = new Map();
+    fabricCanvas.getObjects().forEach((o) => {
+      if (o && o.obj_id) byId.set(String(o.obj_id), o);
+    });
+    const placed = new Set();
+    const nextStack = [];
+    orderIds.forEach((id) => {
+      const obj = byId.get(String(id || ""));
+      if (obj && !placed.has(obj)) {
+        nextStack.push(obj);
+        placed.add(obj);
+      }
+    });
+    // Не упомянутые в порядке объекты остаются сверху в прежней очередности -
+    // так частичный порядок не роняет новые/чужие объекты.
+    fabricCanvas.getObjects().forEach((o) => {
+      if (!placed.has(o)) nextStack.push(o);
+    });
+
+    const activeIds = getSelectedObjectIds();
+    if (fabricCanvas.getActiveObject()) fabricCanvas.discardActiveObject();
+
+    nextStack.forEach((obj, idx) => {
+      if (typeof fabricCanvas.moveToObject === "function") {
+        fabricCanvas.moveToObject(obj, idx);
+      }
+    });
+
+    if (activeIds.length) {
+      restoreSelectionByIds(activeIds);
+    }
+    fabricCanvas.requestRenderAll();
+    drawMiniMap();
+    updateSelectionToolbar();
   }
 
   function enqueueOps(ops) {
@@ -3649,6 +3739,18 @@
     });
   }
   if (selLockBtn) selLockBtn.addEventListener("click", toggleSelectionLock);
+  if (selFrontBtn) {
+    selFrontBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      restackSelection("front");
+    });
+  }
+  if (selBackBtn) {
+    selBackBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      restackSelection("back");
+    });
+  }
   if (selDeleteBtn) {
     selDeleteBtn.addEventListener("click", () => {
       if (!canEdit) return;
@@ -4301,6 +4403,11 @@
       lastSeenSeqId = 0;
       socket.auth.last_seen_seq = 0;
     }
+  });
+
+  socket.on("z_order", (msg) => {
+    if (!msg || msg.board_id !== boardId || !Array.isArray(msg.order)) return;
+    applyZOrder(msg.order);
   });
 
   socket.on("cursor", (msg) => {

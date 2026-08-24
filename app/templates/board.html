@@ -1105,6 +1105,14 @@
         min-width: 40px;
         min-height: 40px;
       }
+
+      /* Mini selection toolbar is tighter than the main one - bump its tap
+         targets a bit too, just not all the way to 40px or the floating
+         toolbar gets unwieldy on phones. */
+      .sel-btn {
+        min-width: 34px;
+        min-height: 34px;
+      }
     }
   </style>
 </head>
@@ -1185,6 +1193,8 @@
     <button class="sel-btn" id="selCornerBtn" type="button" title="Радиус закругления"><span class="bi-local" style="--icon:url('/static/icons/rounded_corner.svg')"></span></button>
     <button class="sel-btn" id="selLockBtn" type="button" title="Заблокировать"><span class="bi-local" id="selLockIcon" style="--icon:url('/static/icons/lock-outline.svg')"></span></button>
     <button class="sel-btn" id="selRotateBtn" type="button" title="Повернуть на 15°"><span class="bi-local" style="--icon:url('/static/icons/arrow-repeat.svg')"></span></button>
+    <button class="sel-btn" id="selFrontBtn" type="button" title="На передний план"><span class="bi-local" style="--icon:url('/static/icons/bring-front.svg')"></span></button>
+    <button class="sel-btn" id="selBackBtn" type="button" title="На задний план"><span class="bi-local" style="--icon:url('/static/icons/send-back.svg')"></span></button>
     <span class="sel-toolbar-sep" id="selDeleteSep"></span>
     <button class="sel-btn sel-btn-danger" id="selDeleteBtn" type="button" title="Удалить"><span class="bi-local" style="--icon:url('/static/icons/trash3.svg')"></span></button>
   </div>
@@ -1282,6 +1292,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/fabric@6.5.3/dist/index.min.js"></script>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-  <script src="/static/board.js?v=20260718-07"></script>
+  <script src="/static/board.js?v=20260824-01"></script>
 </body>
 </html>

@@ -31,7 +31,7 @@ from app.tasks import process_image_task
 
 BASE_DIR = Path(__file__).resolve().parent
 
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+JWT_SECRET = os.getenv("JWT_SECRET", "")
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", str(BASE_DIR / "boards.db"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -42,8 +42,23 @@ DEBUG_USER_ID = os.getenv("DEBUG_USER_ID", "debug-user")
 JWT_LEEWAY_SECONDS = int(os.getenv("JWT_LEEWAY_SECONDS", "45"))
 WS_ACCESS_TTL_SECONDS = int(os.getenv("WS_ACCESS_TTL_SECONDS", "300"))
 WS_REFRESH_TTL_SECONDS = int(os.getenv("WS_REFRESH_TTL_SECONDS", "28800"))
-RATE_LIMIT_HTTP_PER_MINUTE = int(os.getenv("RATE_LIMIT_HTTP_PER_MINUTE", "120"))
 RATE_LIMIT_SOCKET_PER_10S = int(os.getenv("RATE_LIMIT_SOCKET_PER_10S", "60"))
+# University scenario: up to 100 active users behind one NAT IP. The old
+# single per-IP bucket (RATE_LIMIT_HTTP_PER_MINUTE=120) choked whole lecture
+# halls, so limits are now identity-aware and two-tier:
+#   - authenticated requests are budgeted per user_id (taken from the JWT);
+#   - a much higher per-IP ceiling stays as an abuse backstop only.
+RATE_LIMIT_HTTP_PER_USER_PER_MINUTE = int(os.getenv("RATE_LIMIT_HTTP_PER_USER_PER_MINUTE", "600"))
+RATE_LIMIT_HTTP_PER_IP_PER_MINUTE = int(
+    os.getenv("RATE_LIMIT_HTTP_PER_IP_PER_MINUTE")
+    or os.getenv("RATE_LIMIT_HTTP_PER_MINUTE")  # legacy name, kept for old deployments
+    or "5000"
+)
+# Per-endpoint buckets for expensive routes (checked in addition to the tiers above).
+RATE_LIMIT_UPLOAD_PER_MINUTE = int(os.getenv("RATE_LIMIT_UPLOAD_PER_MINUTE", "30"))
+RATE_LIMIT_UPLOAD_POLL_PER_MINUTE = int(os.getenv("RATE_LIMIT_UPLOAD_POLL_PER_MINUTE", "240"))
+RATE_LIMIT_MIRO_IMPORT_PER_MINUTE = int(os.getenv("RATE_LIMIT_MIRO_IMPORT_PER_MINUTE", "5"))
+RATE_LIMIT_WS_TOKEN_PER_MINUTE = int(os.getenv("RATE_LIMIT_WS_TOKEN_PER_MINUTE", "60"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,23 +83,102 @@ app.add_middleware(
 )
 
 
+def _rate_limit_actor(request: Request) -> tuple[str, str]:
+    """Returns (user_key, ip) for rate limiting.
+
+    user_key is "u:<user_id>" when the request carries a JWT whose *signature*
+    verifies (exp is not checked here - an expired token should still count
+    against its owner rather than falling back to the shared IP bucket).
+    Spoofed/invalid tokens fall back to the IP so attackers can't dodge the
+    per-user tier; they can also not exhaust a victim's per-user budget with
+    forged tokens because unverified claims are never trusted.
+    """
+    ip = request.client.host if request.client else "unknown"
+    token = None
+    authz = request.headers.get("authorization")
+    if authz:
+        parts = authz.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+    if not token:
+        token = request.query_params.get("token")
+    if not token:
+        return f"ip:{ip}", ip
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_exp": False},
+        )
+    except Exception:
+        return f"ip:{ip}", ip
+    user_id = payload.get("user_id")
+    if not isinstance(user_id, str) or not user_id:
+        return f"ip:{ip}", ip
+    return f"u:{user_id[:128]}", ip
+
+
+# Endpoint-specific buckets for expensive routes: (path probe, method or None, bucket, limit env key).
+_ENDPOINT_BUCKETS = (
+    ("/import/miro", None, "miro", lambda: RATE_LIMIT_MIRO_IMPORT_PER_MINUTE),
+    ("/upload-image", "POST", "upload", lambda: RATE_LIMIT_UPLOAD_PER_MINUTE),
+    ("/upload-image", "GET", "poll", lambda: RATE_LIMIT_UPLOAD_POLL_PER_MINUTE),
+    ("/ws-token", None, "wstoken", lambda: RATE_LIMIT_WS_TOKEN_PER_MINUTE),
+)
+
+_rl_fail_log_last = 0.0
+
+
 @app.middleware("http")
 async def request_logging_and_rate_limit(request: Request, call_next):
+    global _rl_fail_log_last
     start = time.monotonic()
     client_ip = request.client.host if request.client else "unknown"
 
     if request.url.path.startswith("/api/"):
         window = int(time.time() // 60)
-        key = f"wb:ratelimit:http:{client_ip}:{window}"
-        try:
-            count = await redis_client.incr(key)
-            if count == 1:
-                await redis_client.expire(key, 60)
-        except Exception:
-            count = 0  # Redis unavailable: fail open rather than blocking all traffic.
-        if count > RATE_LIMIT_HTTP_PER_MINUTE:
-            logger.warning("rate_limited method=%s path=%s ip=%s", request.method, request.url.path, client_ip)
-            return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+        retry_after = str(60 - int(time.time()) % 60 + 1)
+        user_key, _ip = _rate_limit_actor(request)
+
+        checks = [
+            (f"wb:rl:http:{user_key}:{window}", RATE_LIMIT_HTTP_PER_USER_PER_MINUTE),
+            (f"wb:rl:http:ip:{client_ip}:{window}", RATE_LIMIT_HTTP_PER_IP_PER_MINUTE),
+        ]
+        for probe, method, bucket, limit_getter in _ENDPOINT_BUCKETS:
+            if probe in request.url.path and (method is None or request.method == method):
+                checks.append((f"wb:rl:{bucket}:{user_key}:{window}", limit_getter()))
+                break
+
+        exceeded = None
+        redis_down = False
+        for key, limit in checks:
+            try:
+                count = await redis_client.incr(key)
+                if count == 1:
+                    await redis_client.expire(key, 65)
+                if count > limit:
+                    exceeded = (key, limit)
+                    break
+            except Exception:
+                # Redis unavailable: fail open rather than blocking all traffic,
+                # but log it (throttled to once a minute) so the gap is visible.
+                redis_down = True
+                break
+        if redis_down and time.monotonic() - _rl_fail_log_last > 60:
+            _rl_fail_log_last = time.monotonic()
+            logger.warning("rate limiter disabled: Redis unavailable (failing open)")
+        if exceeded:
+            key, limit = exceeded
+            logger.warning(
+                "rate_limited method=%s path=%s ip=%s actor=%s bucket=%s limit=%s",
+                request.method, request.url.path, client_ip, user_key, key.rsplit(":", 2)[0], limit,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests"},
+                headers={"Retry-After": retry_after},
+            )
 
     response = await call_next(request)
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -734,8 +828,15 @@ def _db_redo(board_id: str, action: Any, user: UserContext) -> tuple[list[dict[s
         conn.close()
 
 
+def _validate_required_secrets() -> None:
+    missing = [n for n, v in (("JWT_SECRET", JWT_SECRET), ("SERVICE_API_KEY", SERVICE_API_KEY)) if not v]
+    if missing:
+        raise RuntimeError(f"Required secrets are not configured: {', '.join(missing)} (see .env.production)")
+
+
 @app.on_event("startup")
 def on_startup() -> None:
+    _validate_required_secrets()
     init_db()
 
 
@@ -2187,6 +2288,53 @@ def _replace_board_canvas_baseline(conn: sqlite3.Connection, board_id: str, canv
     return updated_at
 
 
+def _db_apply_z_order(board_id: str, ordered_ids: list[str]) -> tuple[str, int]:
+    """Reorder the board's object stack (bottom -> top) to match ordered_ids.
+
+    Runs inside the per-board write queue like every other mutation. Objects
+    missing from ordered_ids keep their relative order at the top of the stack,
+    so a stale/partial client order can never drop objects from the board.
+    Persists by rewriting the baseline canvas (same semantics as
+    POST /api/board/{board_id}) - that also clears the pending op log, which is
+    fine: order is not expressible as an add/update/remove op.
+    """
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        canvas = _read_board_canvas(conn, board_id)
+        objects = [o for o in canvas.get("objects", []) if isinstance(o, dict)]
+        by_id: dict[str, dict[str, Any]] = {}
+        for obj in objects:
+            oid = obj.get("obj_id")
+            if isinstance(oid, str) and oid and oid not in by_id:
+                by_id[oid] = obj
+
+        seen: set[str] = set()
+        new_objects: list[dict[str, Any]] = []
+        for oid in ordered_ids:
+            if oid in seen:
+                continue
+            seen.add(oid)
+            obj = by_id.get(oid)
+            if obj is not None:
+                new_objects.append(obj)
+        for obj in objects:
+            oid = obj.get("obj_id")
+            if not (isinstance(oid, str) and oid in seen):
+                new_objects.append(obj)
+
+        canvas["objects"] = new_objects
+        _ensure_board_size_limit(canvas)
+        updated_at = _replace_board_canvas_baseline(conn, board_id, canvas)
+        conn.commit()
+        return updated_at, len(new_objects)
+    except Exception as exc:
+        conn.rollback()
+        raise exc
+    finally:
+        conn.close()
+
+
 def _append_board_ops(conn: sqlite3.Connection, board_id: str, ops: list[dict[str, Any]]) -> str:
     if not ops:
         updated_at = now_iso()
@@ -2493,6 +2641,59 @@ async def batch_update(sid: str, data: Any):
     await _process_ops_event(sid, data)
 
 
+@sio.event
+async def z_order(sid: str, data: Any):
+    """Client restacked objects (bring-to-front / send-to-back).
+
+    Persists the new stacking and relays the full bottom-to-top id order to
+    everyone else in the room. Sender is skipped - it already applied the
+    change locally.
+    """
+    session = await sio.get_session(sid)
+    if not session or not _can_edit(session):
+        await sio.emit("error_msg", {"message": "Read-only access"}, to=sid)
+        return
+    if not await _check_socket_rate_limit(sid, "z_order"):
+        await sio.emit("error_msg", {"message": "Too many requests, slow down"}, to=sid)
+        return
+    if not isinstance(data, dict) or data.get("board_id") != session.get("board_id"):
+        return
+
+    raw_order = data.get("order")
+    if not isinstance(raw_order, list):
+        return
+    ordered_ids: list[str] = []
+    for item in raw_order[:5000]:
+        if isinstance(item, str) and item:
+            ordered_ids.append(item[:128])
+    if not ordered_ids:
+        return
+
+    board_id = session["board_id"]
+    try:
+        updated_at, _count = await board_task_manager.run(board_id, _db_apply_z_order, board_id, ordered_ids)
+    except ValueError as exc:
+        await sio.emit("error_msg", {"message": str(exc)}, to=sid)
+        return
+    except Exception as exc:
+        logger.exception("z_order failed for board %s: %s", board_id, exc)
+        await sio.emit("error_msg", {"message": "Failed to update object order"}, to=sid)
+        return
+
+    await sio.emit(
+        "z_order",
+        {
+            "board_id": board_id,
+            "order": ordered_ids,
+            "updated_at": updated_at,
+            "author": session.get("user_id"),
+            "client_id": session.get("client_id"),
+        },
+        room=board_id,
+        skip_sid=sid,
+    )
+
+
 async def _process_ops_event(sid: str, data: Any):
     session = await sio.get_session(sid)
     if not session or not _can_edit(session):
@@ -2568,6 +2769,9 @@ async def clear(sid: str):
     if not session or session.get("jwt_role") != "moderator":
         await sio.emit("error_msg", {"message": "Only moderator can clear board"}, to=sid)
         return
+    if not await _check_socket_rate_limit(sid, "clear", limit=6):
+        await sio.emit("error_msg", {"message": "Too many clear requests"}, to=sid)
+        return
 
     board_id = session["board_id"]
     cleared = default_canvas_state()
@@ -2588,6 +2792,9 @@ async def clear(sid: str):
 
 @sio.event
 async def save(sid: str):
+    if not await _check_socket_rate_limit(sid, "save", limit=12):
+        await sio.emit("error_msg", {"message": "Too many save requests"}, to=sid)
+        return
     await sio.emit("saved", {"ok": True}, to=sid)
 
 
@@ -2595,6 +2802,8 @@ async def save(sid: str):
 async def history_state_request(sid: str):
     session = await sio.get_session(sid)
     if not session:
+        return
+    if not await _check_socket_rate_limit(sid, "hist_state", limit=30):
         return
     hist = await board_manager.get_user_history(session["board_id"], _history_actor_key(session))
     await sio.emit(
@@ -2608,6 +2817,8 @@ async def history_state_request(sid: str):
 async def undo(sid: str):
     session = await sio.get_session(sid)
     if not session or not _can_edit(session):
+        return
+    if not await _check_socket_rate_limit(sid, "undo", limit=30):
         return
 
     board_id = session["board_id"]
@@ -2665,6 +2876,8 @@ async def undo(sid: str):
 async def redo(sid: str):
     session = await sio.get_session(sid)
     if not session or not _can_edit(session):
+        return
+    if not await _check_socket_rate_limit(sid, "redo", limit=30):
         return
 
     board_id = session["board_id"]

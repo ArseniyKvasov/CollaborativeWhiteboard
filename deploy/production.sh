@@ -16,6 +16,7 @@
 #   ./deploy/production.sh                # full zero-downtime deploy
 #   ./deploy/production.sh --skip-build   # reuse existing images
 #   ./deploy/production.sh --no-backup    # skip pre-deploy pg_dump
+#   ./deploy/production.sh --no-cron      # do not touch host crontab
 #   ./deploy/production.sh --prune        # docker image prune after switch
 #   ./deploy/production.sh status         # show slots / state / upstream
 #   ./deploy/production.sh rollback       # deploy back to the previous slot
@@ -43,11 +44,12 @@ info() { printf "${C_G}[deploy]${C_0} %s\n" "$*"; }
 warn() { printf "${C_Y}[warn]${C_0} %s\n" "$*"; }
 die()  { printf "${C_R}[error]${C_0} %s\n" "$*" >&2; exit 1; }
 
-SKIP_BUILD=0; DO_BACKUP=1; DO_PRUNE=0; COMMAND="deploy"
+SKIP_BUILD=0; DO_BACKUP=1; DO_PRUNE=0; SKIP_CRON=0; COMMAND="deploy"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1 ;;
     --no-backup)  DO_BACKUP=0 ;;
+    --no-cron)    SKIP_CRON=1 ;;
     --prune)      DO_PRUNE=1 ;;
     status|rollback|nginx-install) COMMAND="$1" ;;
     *) die "Unknown argument: $1 (see header of this script)" ;;
@@ -162,6 +164,35 @@ stop_slot() {  # stop_slot <slot>
   info "Removed slot $s containers"
 }
 
+install_cron() {
+  # Idempotent: replaces only the marker-wrapped block, keeps user's other jobs.
+  command -v crontab >/dev/null || { warn "crontab not found - install cron jobs manually (see README)"; return 0; }
+
+  local backup_line="" cleanup_line
+  cleanup_line="0 4 * * 0 cd $APP_DIR && docker compose --env-file $ENV_FILE -f $COMPOSE_FILE exec -T whiteboard python scripts/cleanup_stale_boards.py --yes >> $APP_DIR/backups/cleanup.log 2>&1"
+  if [[ -n "${PG_BACKUP_S3_PREFIX:-}" && -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    backup_line="30 3 * * * mkdir -p $APP_DIR/backups && $APP_DIR/deploy/backup_db.sh >> $APP_DIR/backups/backup.log 2>&1"
+  else
+    warn "PG_BACKUP_S3_PREFIX / AWS_* not set in $ENV_FILE - backup cron skipped (cleanup cron installed)"
+  fi
+
+  local BEGIN="# >>> whiteboard-managed >>>" END="# <<< whiteboard-managed <<<"
+  {
+    crontab -l 2>/dev/null | awk -v s="$BEGIN" -v e="$END" \
+      'index($0,s)==1 {skip=1; next} index($0,e)==1 {skip=0; next} !skip'
+    echo "$BEGIN"
+    [[ -n "$backup_line" ]] && echo "$backup_line"
+    echo "$cleanup_line"
+    echo "$END"
+  } | crontab -
+
+  if [[ -n "$backup_line" ]]; then
+    info "cron installed: db backup daily 03:30, stale-board cleanup weekly Sun 04:00"
+  else
+    info "cron installed: stale-board cleanup weekly Sun 04:00 (backup skipped - see warning above)"
+  fi
+}
+
 cmd_deploy() {
   read_state; detect_active_slot
   local target prev_active
@@ -203,6 +234,7 @@ cmd_deploy() {
   fi
 
   (( DO_PRUNE )) && { info "Pruning dangling images"; docker image prune -f >/dev/null; }
+  (( SKIP_CRON )) || install_cron
 
   info "Deploy complete: slot $target on :$(slot_port "$target") (previous: ${prev_active:-none})"
   info "WebSocket note: existing sockets were served by the old worker until clients reconnect; Socket.IO auto-reconnects."

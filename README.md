@@ -1,131 +1,43 @@
 # WhiteboardCollaborative
 
-Коллаборативная бесконечная доска на FastAPI, Fabric.js и Socket.IO. Проект
-рассчитан на встраивание через `iframe` во внешний сервис, доступ по JWT,
-realtime-редактирование несколькими пользователями и продакшен-деплой за Nginx.
+Коллаборативная бесконечная доска: FastAPI + Fabric.js + Socket.IO.
+Встраивается в сторонний сервис через `iframe`, авторизация — JWT.
+![Доска](docs/images/whiteboard-desktop.png)
 
-![Desktop Board](docs/images/whiteboard-desktop.png)
+**Возможности:** бесконечный холст с pan/zoom, realtime-курсоры и совместное
+редактирование, фигуры/текст/стикеры/карандаш/ластик, загрузка картинок (сжатие
+в Celery, хранение в S3), undo/redo, блокировка объектов, слои, модерация
+(очистка доски, политика «можно ли ученикам рисовать»), zero-downtime деплой,
+бэкапы PostgreSQL в S3 по расписанию, автоочистка неактивных досок.
 
-![Mobile Board](docs/images/whiteboard-mobile.png)
-
-![Toolbar And Shapes](docs/images/whiteboard-toolbar.png)
-
-## Возможности
-
-- Бесконечный холст с pan/zoom
-- Realtime-коллаборация через Socket.IO
-- JWT для REST, iframe-доступа и websocket-подключения
-- Undo/redo на каждого пользователя
-- Presence-курсоры
-- Библиотека фигур, текст, карандаш, ластик, загрузка изображений
-- Модераторские функции: очистка доски, политика рисования
-- Zero-downtime деплой через `./deploy/production.sh`
-
-## Стек
-
-- Backend: FastAPI
-- Realtime: python-socketio (Redis — для масштабирования на несколько воркеров)
-- Фоновые задачи: Celery (брокер и бэкенд — Redis) — сжатие изображений уходит
-  из HTTP-запроса в воркер
-- Frontend: Fabric.js + Bootstrap 5
-- База: PostgreSQL (без `DATABASE_URL` — локальный SQLite, см. «Локальный запуск»)
-- Auth: JWT HS256
-
-## Разработка (dev)
-
-### Docker Compose
+## Разработка
 
 ```bash
 docker compose up --build
 ```
 
-Поднимаются сервисы `db`, `redis`, `whiteboard` и `celery-worker` (загрузка и
-сжатие картинок в фоне). Доска будет доступна на `http://localhost:8000`.
+Поднимаются `db`, `redis`, `whiteboard`, `celery-worker`.
 
-Открыть доску в dev-режиме без JWT:
+**Доска:** http://localhost:8642/board/dev-board (порт = `DEV_HOST_PORT`;
+`DEBUG=True` в `.env` — JWT не требуется).
 
-- **http://localhost:8000/board/dev-board**
+Локально без Docker: `pip install -r requirements.txt`, в `.env` указать
+`DATABASE_URL=app/boards.db`, `UPLOAD_DIR=app/uploads`, доступный Redis;
+`uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000 --env-file .env
+--reload-exclude "app/uploads/*" --reload-exclude "*.db" --reload-exclude "*.db-*"`.
+Celery: `celery -A app.celery_app worker --loglevel=info` — без него картинки
+зависают в статусе `processing`.
 
-Если `DEBUG=True`, JWT отключается для HTTP/Socket.IO и доска открывается
-напрямую в браузере.
+## Деплой (Ubuntu 22.04/24.04)
 
-Проверка здоровья: `curl http://localhost:8000/health`
-
-### Локальный запуск (uvicorn)
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-`.env.example` написан под сеть Docker Compose (`DATABASE_URL` указывает на хост
-`db`, `UPLOAD_DIR=/data/uploads`) — вне контейнера они не резолвятся. Для
-голого `uvicorn` поправьте `.env`:
+Нужны: Docker + compose plugin, nginx, certbot, `awscli` (для бэкапов),
+`crontab`. Домены основного сервиса и доски должны указывать A-записями на сервер.
 
 ```bash
-DEBUG=True
-# SQLite-файл рядом с кодом - строку postgresql:// можно просто удалить
-DATABASE_URL=app/boards.db
-UPLOAD_DIR=app/uploads
-# Redis обязателен (presence, история undo/redo, rate-limiting):
-REDIS_URL=redis://localhost:6379/0
-```
-
-Запуск:
-
-```bash
-uvicorn app.main:asgi_app --reload --host 0.0.0.0 --port 8000 --env-file .env \
-  --reload-exclude "app/uploads/*" --reload-exclude "*.db" --reload-exclude "*.db-*"
-```
-
-`--reload-exclude` обязателен: `boards.db` и `app/uploads/` лежат внутри `app/`
-и меняются при каждой операции; без исключений `--reload` перезапускает процесс
-и рвёт все открытые WebSocket-соединения.
-
-Celery-воркер запускается отдельно (см. [Celery](#celery)) — без него загрузка
-изображений навсегда останется в статусе «обрабатывается».
-
-## Деплой на продакшен (Ubuntu 22.04/24.04)
-
-Деплой делается скриптом `./deploy/production.sh`: blue-green на одном хосте,
-два слота приложения на портах 18743/18744, общие `db`/`redis`, переключение
-через graceful reload Nginx. Даунтайма нет: если новый слот не прошёл
-health-check, старый продолжает обслуживать трафик.
-
-### 1. Зависимости на сервере
-
-```bash
-sudo apt update
-sudo apt install -y ca-certificates curl gnupg git openssl nginx snapd ufw
-
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io \
-  docker-buildx-plugin docker-compose-plugin
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"   # после этого переподключитесь по SSH
-
-sudo snap install core && sudo snap refresh core
-sudo snap install --classic certbot
-sudo ln -sf /snap/bin/certbot /usr/local/bin/certbot
-```
-
-### 2. Домены и секреты
-
-Задайте домены основного сервиса и доски и сгенерируйте секреты один раз:
-
-```bash
+# 1. Секреты (один раз). Замените домены!
+sudo mkdir -p /opt/whiteboard && sudo chown "$USER":"$USER" /opt/whiteboard
 export FASTCLASS_BASE_URL="https://fastclass.example.com"
 export WHITEBOARD_BASE_URL="https://board.example.com"
-
-sudo mkdir -p /opt/whiteboard && sudo chown "$USER":"$USER" /opt/whiteboard
 cat > /opt/whiteboard/whiteboard.env <<EOF
 WHITEBOARD_BASE_URL=${WHITEBOARD_BASE_URL}
 WHITEBOARD_DOMAIN=${WHITEBOARD_BASE_URL#https://}
@@ -135,19 +47,10 @@ WHITEBOARD_JWT_SECRET=$(openssl rand -hex 32)
 WHITEBOARD_SERVICE_API_KEY=$(openssl rand -hex 32)
 EOF
 chmod 600 /opt/whiteboard/whiteboard.env
-```
 
-Создайте DNS A-запись `<WHITEBOARD_DOMAIN> -> IP сервера` и проверьте:
-`getent hosts "$WHITEBOARD_DOMAIN"`.
-
-### 3. Код и production-конфиг
-
-```bash
-sudo mkdir -p /opt && sudo chown "$USER":"$USER" /opt
-cd /opt
-git clone https://github.com/ArseniyKvasov/CollaborativeWhiteboard.git collaborative-whiteboard
+# 2. Код и конфиг
+cd /opt && git clone https://github.com/ArseniyKvasov/CollaborativeWhiteboard.git collaborative-whiteboard
 cd collaborative-whiteboard
-
 set -a; . /opt/whiteboard/whiteboard.env; set +a
 cat > .env.production <<EOF
 DEBUG=False
@@ -159,286 +62,130 @@ UPLOAD_DIR=/data/uploads
 CORS_ORIGINS=${FASTCLASS_BASE_URL},${WHITEBOARD_BASE_URL}
 JWT_SECRET=${WHITEBOARD_JWT_SECRET}
 SERVICE_API_KEY=${WHITEBOARD_SERVICE_API_KEY}
+# --- S3 (медиа). Пусто = локальный диск. Бакет держать приватным. ---
+MEDIA_S3_BUCKET=
+MEDIA_S3_LOCATION=media
+MEDIA_S3_ENDPOINT_URL=https://storage.yandexcloud.net
+MEDIA_S3_REGION_NAME=ru-central1
+MEDIA_S3_ACCESS_KEY_ID=
+MEDIA_S3_SECRET_ACCESS_KEY=
+# --- Бэкапы PostgreSQL в S3 ---
+PG_BACKUP_S3_PREFIX=s3://whiteboard-postgres/postgres/production
+AWS_ENDPOINT=https://storage.yandexcloud.net
+AWS_REGION=ru-central1
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+BACKUP_KEEP_LOCAL=7
+BACKUP_S3_RETENTION_DAYS=30
+# --- Очистка неактивных досок ---
+STALE_BOARD_DAYS=90
 EOF
 chmod 600 .env.production
-```
 
-`JWT_SECRET` должен совпадать с секретом, которым FastClass подписывает токены;
-`SERVICE_API_KEY` — для служебных admin-операций. SQLite в проде не использовать.
-
-### 4. Сертификат Let's Encrypt
-
-```bash
-set -a; . /opt/whiteboard/whiteboard.env; set +a
-sudo systemctl stop nginx   # если запущен (standalone-проверка)
+# 3. Сертификат
+sudo systemctl stop nginx
 sudo certbot certonly --standalone -d "$WHITEBOARD_DOMAIN"
 sudo systemctl start nginx
-sudo certbot renew --dry-run
+
+# 4. Nginx + первый деплой
+./deploy/production.sh nginx-install
+./deploy/production.sh
 ```
 
-### 5. Nginx и первый деплой
+`./deploy/production.sh` при каждом запуске: build → старт неактивного слота
+(порты 18743/18744, `db`/`redis` общие) → ожидание `/health` → переключение
+nginx upstream (graceful reload, даунтайма нет) → удаление старого слота →
+**идемпотентная установка cron'ов** (бэкап ежедневно 03:30, очистка досок вс
+04:00 — только если заданы `PG_BACKUP_S3_PREFIX` и `AWS_*`). Перед деплоем
+снимается локальный `pg_dump`. Если новый слот не прошёл health-check — старый
+продолжает работать.
 
 ```bash
-./deploy/production.sh nginx-install   # один раз: сайт, websocket-map, upstream, reload
-./deploy/production.sh                 # каждый релиз: build -> health -> switch -> cleanup
+./deploy/production.sh status      # слоты, порты, upstream
+./deploy/production.sh rollback    # вернуть предыдущий слот
+./deploy/production.sh --skip-build --no-backup   # быстрые флаги
 ```
 
-Полезные команды:
+## Медиа в S3
+
+Новые загрузки пишутся **только в S3** (сбой → retry Celery), раздаются
+приложением по прежним ссылкам `/uploads/{board}/{file}` — фронтенд и данные
+доски не меняются, бакет приватный. Без `MEDIA_S3_*` работает локальный диск.
+
+Перенос существующих файлов (идемпотентно, можно перезапускать):
 
 ```bash
-./deploy/production.sh status          # активный слот, порты, upstream
-./deploy/production.sh rollback        # задеплоить обратно предыдущий слот
-./deploy/production.sh --skip-build    # без пересборки образов
-./deploy/production.sh --prune         # почистить dangling-образы
-```
-
-Как это работает:
-
-1. Скрипт поднимает **неактивный** слот (`whiteboard-prod-a` или `-b`) на своём
-   порту; `db` и `redis` продолжают работать.
-2. Ждёт `/health` = `ok` + `redis:true` (таймаут `HEALTH_TIMEOUT`, по умолчанию 180 с).
-3. Перезаписывает `/etc/nginx/conf.d/whiteboard-upstream.conf` на новый порт и
-   делает `systemctl reload nginx`. Старые соединения дорабатывают у старого
-   воркера, Socket.IO сам переподключается на новый слот.
-4. Только после успешного переключения удаляются контейнеры старого слота.
-   Перед деплоем снимается `pg_dump` в `backups/` (хранятся последние 7).
-
-Порты файрвола:
-
-```bash
-sudo ufw allow OpenSSH && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
-sudo ufw --force enable && sudo ufw status
-```
-
-### 6. Проверка после деплоя
-
-```bash
-curl https://"$WHITEBOARD_DOMAIN"/health
-```
-
-В браузере: два пользователя видят правки друг друга, курсоры с именами,
-картинки завершают обработку, в DevTools нет ошибок WebSocket/Socket.IO.
-При нескольких воркерах за прокси для websocket-маршрута нужны sticky sessions;
-при `UVICORN_WORKERS=1` (по умолчанию) ничего дополнительно не требуется.
-
-## Celery
-
-Изображения (`POST /api/board/{board_id}/upload-image`) сжимаются фоново:
-эндпоинт сразу возвращает `job_id`, фронтенд опрашивает
-`GET /api/board/{board_id}/upload-image/{job_id}` и показывает плейсхолдер до
-готовности.
-
-В Docker Compose воркер стартует автоматически. Локально — отдельным
-терминалом с теми же переменными окружения (`REDIS_URL`, `UPLOAD_DIR`):
-
-```bash
-celery -A app.celery_app worker --loglevel=info
-```
-
-Без воркера сервис работает, но любая загрузка изображения зависнет в статусе
-`processing` — `job_id` никогда не будет обработан.
-
-## Environment
-
-- `JWT_SECRET` — общий секрет JWT (HS256), обязателен в проде
-- `SERVICE_API_KEY` — ключ служебных admin-операций, обязателен в проде
-- `DATABASE_URL` — PostgreSQL (`postgresql://user:pass@host:5432/db`);
-  без него — локальный SQLite (`app/boards.db`)
-- `REDIS_URL` — Redis (обязателен: presence, история undo/redo,
-  rate-limiting, межпроцессный Socket.IO)
-- `UPLOAD_DIR` — каталог загруженных изображений (по умолчанию `app/uploads`)
-- `CORS_ORIGINS` — список origin через запятую
-- `DEBUG` — dev-режим; при `True` JWT не требуется
-- `RATE_LIMIT_HTTP_PER_USER_PER_MINUTE` — бюджет запросов к `/api/*` на пользователя (из JWT), по умолчанию `600`
-- `RATE_LIMIT_HTTP_PER_IP_PER_MINUTE` — backstop на IP от флуда, по умолчанию `5000`;
-  держите высоким — университет может NAT-ить ~100 пользователей за один IP
-- `RATE_LIMIT_UPLOAD_PER_MINUTE` / `RATE_LIMIT_UPLOAD_POLL_PER_MINUTE` — загрузка картинок (`30`)
-  и поллинг статуса (`240`) в отдельных бакетах
-- `RATE_LIMIT_MIRO_IMPORT_PER_MINUTE` — импорт из Miro (`5`, тяжёлый внешний трафик)
-- `RATE_LIMIT_WS_TOKEN_PER_MINUTE` — выпуск/refresh ws-токенов (`60`)
-- `RATE_LIMIT_SOCKET_PER_10S` — базовый лимит событий Socket.IO на соединение (`60`);
-  производные: cursor ×5, undo/redo/hist 30/10с, save 12/10с, clear 6/10с
-- `CELERY_WORKER_CONCURRENCY` — число воркер-процессов Celery (`2`)
-- `HOST_PORT` — внешний порт Docker Compose (рекомендуется `18743`)
-- `UVICORN_WORKERS` — держите `1`, см. комментарий в `docker-compose.prod.yml`
-  про sticky sessions
-
-## Медиа в S3 (Yandex Object Storage)
-
-Загруженные картинки после сжатия складываются в S3, а раздаются приложением
-по прежним ссылкам `/uploads/{board_id}/{file}` — фронтенд и данные доски не
-заметили переезда. Файлы в бакете можно держать приватными.
-
-- Если `MEDIA_S3_*` не заданы — работает локальный диск (`UPLOAD_DIR`), как раньше
-- Раздача: `GET /uploads/...` стримит из S3; локальная копия используется как
-  fallback для файлов до миграции
-- Новые файлы пишутся **только в S3**; сбой загрузки ретраится Celery, а не
-  теряется
-
-Включение и перенос старых файлов:
-
-```bash
-# 1) Создайте приватный bucket и статические ключи в Yandex Cloud,
-#    затем пропишите в .env.production:
-# MEDIA_S3_BUCKET=whiteboard-prod-media
-# MEDIA_S3_LOCATION=media
-# MEDIA_S3_ENDPOINT_URL=https://storage.yandexcloud.net
-# MEDIA_S3_REGION_NAME=ru-central1
-# MEDIA_S3_ACCESS_KEY_ID=YCA...
-# MEDIA_S3_SECRET_ACCESS_KEY=YCP...
-
-./deploy/production.sh   # пересборка с boto3 + zero-downtime переключение
-
-# 2) Миграция старых загрузок (идемпотентна: уже перенесённое пропускается)
 docker compose --env-file .env.production -f docker-compose.prod.yml \
   exec whiteboard python scripts/migrate_uploads_to_s3.py --dry-run
 docker compose --env-file .env.production -f docker-compose.prod.yml \
   exec whiteboard python scripts/migrate_uploads_to_s3.py
-
-# 3) После проверки досок можно освободить диск:
+# после проверки досок — освободить диск:
 docker compose --env-file .env.production -f docker-compose.prod.yml \
   exec whiteboard python scripts/migrate_uploads_to_s3.py --delete-local
 ```
 
-Пока шаг 3 не выполнен, откат тривиален: уберите `MEDIA_S3_*` из
-`.env.production` и повторите `./deploy/production.sh` — раздача вернётся на
-локальный диск.
+## Бэкапы и очистка
 
-## Бэкапы PostgreSQL
+- **Бэкап БД**: cron (ставится деплоем) → `deploy/backup_db.sh`: дамп → gzip →
+  S3 с проверкой размера; ротация `BACKUP_S3_RETENTION_DAYS` (30 дней) и
+  локально 7 копий. Логи: `backups/backup.log`.
+- **Восстановление**:
+  ```bash
+  aws s3 cp s3://whiteboard-postgres/postgres/production/db-XXXX.sql.gz . \
+    --endpoint-url https://storage.yandexcloud.net
+  # остановить app, пересоздать volume db, затем:
+  gunzip -c db-XXXX.sql.gz | docker compose --env-file .env.production \
+    -f docker-compose.prod.yml exec -T db psql -U whiteboard -d whiteboard
+  ```
+- **Неактивные доски**: `scripts/cleanup_stale_boards.py` (cron вс 04:00)
+  удаляет доски без изменений `STALE_BOARD_DAYS` дней + их медиа (S3 и диск) +
+  кэш; dry-run по умолчанию. Логи: `backups/cleanup.log`. Раз в месяц стоит
+  проверять восстановление бэкапа на тестовой машине.
 
-Два уровня:
+## Переменные окружения
 
-1. **Перед каждым деплоем** — `deploy/production.sh` снимает локальный
-   `pg_dump` в `backups/` (хранятся последние 7) — страховка на время миграций.
-2. **Ежедневно в S3** — `deploy/backup_db.sh` по cron хоста: дамп → gzip →
-   загрузка в `PG_BACKUP_S3_PREFIX` с проверкой размера.
+| Переменная | Назначение |
+|---|---|
+| `JWT_SECRET`, `SERVICE_API_KEY` | секреты; обязательны в проде (валидация на старте) |
+| `DATABASE_URL`, `REDIS_URL` | Postgres / Redis (Redis обязателен) |
+| `CORS_ORIGINS` | origin'ы через запятую (сервис + доска) |
+| `DEBUG` | `True` — JWT отключён (только dev) |
+| `HOST_PORT` / `DEV_HOST_PORT` | порты prod/dev |
+| `UVICORN_WORKERS` | держать `1` (см. комментарий в compose про sticky) |
+| `MEDIA_S3_*` | бакет/ключи медиа; пусто = локальный диск |
+| `PG_BACKUP_S3_PREFIX`, `AWS_*` | бакет и ключи бэкапов |
+| `BACKUP_S3_RETENTION_DAYS`, `BACKUP_KEEP_LOCAL` | ротация бэкапов (30 / 7) |
+| `STALE_BOARD_DAYS` | возраст неактивных досок для удаления (90) |
+| `RATE_LIMIT_*`, `CELERY_WORKER_CONCURRENCY` | лимиты и воркеры (см. `.env.example`) |
 
-Настройка (один раз):
+Rate limiting: бюджет по `user_id` из JWT (600/мин) + backstop по IP (5000/мин)
++ отдельные бакеты на upload/miro/ws-token; лимиты на все мутирующие
+Socket.IO-события. Настройка — в `.env.example`.
 
-```bash
-# awscli на хосте
-sudo apt install -y awscli
+## Интеграция
 
-# переменные в .env.production (ключи — те же статические, что для медиа,
-# или отдельный сервисный аккаунт с доступом только к бакету бэкапов):
-# PG_BACKUP_S3_PREFIX=s3://whiteboard-postgres/postgres/production
-# AWS_ENDPOINT=https://storage.yandexcloud.net
-# AWS_REGION=ru-central1
-# AWS_ACCESS_KEY_ID=YCA...
-# AWS_SECRET_ACCESS_KEY=YCP...
-
-# первый запуск вручную (проверка)
-./deploy/backup_db.sh
-
-# расписание — ежедневно в 03:30
-(crontab -l 2>/dev/null; echo "30 3 * * * $PWD/deploy/backup_db.sh >> /var/log/whiteboard-backup.log 2>&1") | crontab -
-
-# ротация в S3: либо lifecycle-правило в консоли Yandex (бакет -> Lifecycle ->
-# "Удалить объекты старше N дней"), либо флагом:
-#   ./deploy/backup_db.sh --prune-s3 30
-```
-
-Восстановление:
-
-```bash
-# свежий дамп с сервера или из S3
-aws s3 cp s3://whiteboard-postgres/postgres/production/db-YYYYMMDD-HHMMSS.sql.gz . \
-  --endpoint-url https://storage.yandexcloud.net
-
-docker compose --env-file .env.production -f docker-compose.prod.yml down db
-docker volume rm collaborative-whiteboard_postgres_prod_data   # ВНИМАНИЕ: стирает текущие данные
-docker compose --env-file .env.production -f docker-compose.prod.yml up -d db
-gunzip -c db-YYYYMMDD-HHMMSS.sql.gz | docker compose --env-file .env.production \
-  -f docker-compose.prod.yml exec -T db psql -U whiteboard -d whiteboard
-docker compose --env-file .env.production -f docker-compose.prod.yml up -d
-```
-
-Раз в месяц стоит прогонять восстановление на тестовой машине — бэкап, который
-не восстанавливали, не бэкап. WAL-G/PITR (потеря ≤ пары минут) имеет смысл
-только при соответствующих требованиях; для досок суточный дамп достаточен.
-
-Ротация в S3 включена по умолчанию: при каждом бэкапе удаляются дампы старше
-`BACKUP_S3_RETENTION_DAYS` (30 дней, `0` — выключить). Флаг `--prune-s3 N`
-переопределяет разово; альтернатива — lifecycle-правило в консоли Yandex
-(тогда поставьте `BACKUP_S3_RETENTION_DAYS=0`, чтобы не дублировать).
-
-## Очистка неактивных досок
-
-Доски, которые **не изменялись** `STALE_BOARD_DAYS` дней (по умолчанию 90),
-удаляются еженедельным cron'ом вместе с их медиа (S3-префикс и локальные
-файлы), ops/members (каскад FK) и Redis-кэшем канваса. Критерий — время
-последней правки: просмотры не пишутся в БД принципиально (нет записи на
-каждый connect), поэтому «открыли, но не рисовали 90 дней» = удаляется.
-
-```bash
-# посмотреть, что попадёт под удаление (dry-run, ничего не трогает):
-docker compose --env-file .env.production -f docker-compose.prod.yml \
-  exec whiteboard python scripts/cleanup_stale_boards.py
-
-# еженедельное расписание — воскресенье 04:00:
-(crontab -l 2>/dev/null; echo "0 4 * * 0 cd $PWD && docker compose --env-file .env.production -f docker-compose.prod.yml exec -T whiteboard python scripts/cleanup_stale_boards.py --yes >> /var/log/whiteboard-cleanup.log 2>&1") | crontab -
-```
-
-Порог настраивается через `STALE_BOARD_DAYS` в `.env.production` или флагом
-`--days N`; за один запуск обрабатывается не более `--limit` (500) досок —
-при большом backlog'е скрипт просто догоняет за несколько недель.
-
-## JWT
-
-Ожидаются claims: `user_id` (обязательно), `exp` (обязательно), `username`
-(для курсоров), `role` (`moderator` даёт право очистки доски).
-
-JWT обязателен для REST (`Authorization: Bearer <token>`) и Socket.IO/iframe
-(`?token=<jwt>`).
-
-Пример генерации на стороне основного сервиса:
+JWT HS256; обязательные claims `user_id`, `exp`; `username` для курсоров;
+`role`: `viewer` / `editor` / `moderator`. Секрет только на сервере.
 
 ```python
-from datetime import datetime, timedelta, timezone
-import jwt
-
-def make_whiteboard_token(user, board_id):
-    payload = {
-        "user_id": str(user.pk),
-        "username": user.get_full_name() or user.username,
-        "role": "moderator" if user.has_full_access else "editor",
-        "board_id": board_id,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
-    }
-    return jwt.encode(payload, WHITEBOARD_JWT_SECRET, algorithm="HS256")
+jwt.encode({"user_id": str(user.pk), "username": user.get_full_name(),
+            "role": "moderator" if user.has_full_access else "editor",
+            "board_id": board_id,
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+           WHITEBOARD_JWT_SECRET, algorithm="HS256")
 ```
-
-Секрет нельзя передавать во frontend или хранить в HTML.
-
-## Service API Key
-
-Служебные операции без user JWT, заголовок `X-API-Key: <SERVICE_API_KEY>`:
-
-- `POST /api/admin/board/{board_id}/drawing` — тело `{ "allow_students_draw": true|false }`
-- `DELETE /api/admin/board/{board_id}` — удалить доску
-
-Разрешить ученикам рисовать:
-
-```bash
-set -a; . /opt/whiteboard/whiteboard.env; set +a
-curl -X POST "${WHITEBOARD_BASE_URL}/api/admin/board/lesson-123/drawing" \
-  -H "X-API-Key: $WHITEBOARD_SERVICE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"allow_students_draw": true}'
-```
-
-При `allow_students_draw=false` рисовать смогут только пользователи с ролью
-`moderator`.
-
-## iframe
 
 ```html
-<iframe
-    src="https://board.example.com/board/BOARD_ID?token=JWT_TOKEN"
-    title="Виртуальная доска"
-    allow="clipboard-read; clipboard-write"
-></iframe>
+<iframe src="https://board.example.com/board/BOARD_ID?token=JWT_TOKEN"
+        allow="clipboard-read; clipboard-write"></iframe>
 ```
 
-`BOARD_ID` должен быть стабильным для урока/класса; JWT создаётся на сервере и
-передаётся только авторизованному пользователю.
+Служебные операции (заголовок `X-API-Key: SERVICE_API_KEY`):
+
+```bash
+curl -X POST "$WHITEBOARD_BASE_URL/api/admin/board/lesson-123/drawing" \
+  -H "X-API-Key: $WHITEBOARD_SERVICE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"allow_students_draw": true}'
+curl -X DELETE "$WHITEBOARD_BASE_URL/api/admin/board/lesson-123" \
+  -H "X-API-Key: $WHITEBOARD_SERVICE_API_KEY"
+```

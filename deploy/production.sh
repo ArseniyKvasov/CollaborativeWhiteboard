@@ -279,7 +279,8 @@ EOF
   sed "s/__WHITEBOARD_DOMAIN__/$WHITEBOARD_DOMAIN/g" "$NGINX_SITE_TMPL" \
     | sudo tee "/etc/nginx/sites-available/$NGINX_SITE_NAME" >/dev/null
   sudo ln -sf "/etc/nginx/sites-available/$NGINX_SITE_NAME" "/etc/nginx/sites-enabled/$NGINX_SITE_NAME"
-  sudo nginx -t && sudo systemctl reload nginx
+  sudo nginx -t || die "nginx -t failed - site config NOT applied (см. ошибку выше: обычно отсутствует сертификат или старый nginx)"
+  sudo systemctl reload nginx
   info "nginx installed for $WHITEBOARD_DOMAIN (upstream -> slot ${ACTIVE_SLOT:-a})"
 }
 

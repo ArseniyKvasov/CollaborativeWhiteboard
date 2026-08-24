@@ -30,8 +30,9 @@ Celery: `celery -A app.celery_app worker --loglevel=info` — без него к
 
 ## Деплой (Ubuntu 22.04/24.04)
 
-Нужны: Docker + compose plugin, nginx, certbot, `awscli` (для бэкапов),
-`crontab`. Домены основного сервиса и доски должны указывать A-записями на сервер.
+Нужны: Docker + compose plugin, nginx, certbot, `crontab`. На хосте больше
+ничего не нужно — бэкапы идут через boto3 внутри контейнера. Домены основного
+сервиса и доски должны указывать A-записями на сервер.
 
 ```bash
 # 1. Секреты (один раз). Замените домены!
@@ -127,16 +128,18 @@ docker compose --env-file .env.production -f docker-compose.prod.yml \
 ## Бэкапы и очистка
 
 - **Бэкап БД**: cron (ставится деплоем) → `deploy/backup_db.sh`: дамп → gzip →
-  S3 с проверкой размера; ротация `BACKUP_S3_RETENTION_DAYS` (30 дней) и
-  локально 7 копий. Логи: `backups/backup.log`.
+  S3 через boto3 внутри контейнера (awscli на хосте не нужен) с проверкой
+  размера; ротация `BACKUP_S3_RETENTION_DAYS` (30 дней) и локально 7 копий.
+  Логи: `backups/backup.log`.
 - **Восстановление**:
   ```bash
-  aws s3 cp s3://whiteboard-postgres/postgres/production/db-XXXX.sql.gz . \
-    --endpoint-url https://storage.yandexcloud.net
+  docker compose --env-file .env.production -f docker-compose.prod.yml \
+    exec -T whiteboard python scripts/s3_backup_tool.py cat db-XXXX.sql.gz > db.sql.gz
   # остановить app, пересоздать volume db, затем:
-  gunzip -c db-XXXX.sql.gz | docker compose --env-file .env.production \
+  gunzip -c db.sql.gz | docker compose --env-file .env.production \
     -f docker-compose.prod.yml exec -T db psql -U whiteboard -d whiteboard
   ```
+- Список дампов: `... exec whiteboard python scripts/s3_backup_tool.py ls`
 - **Неактивные доски**: `scripts/cleanup_stale_boards.py` (cron вс 04:00)
   удаляет доски без изменений `STALE_BOARD_DAYS` дней + их медиа (S3 и диск) +
   кэш; dry-run по умолчанию. Логи: `backups/cleanup.log`. Раз в месяц стоит

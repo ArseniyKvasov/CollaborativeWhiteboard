@@ -304,6 +304,59 @@ docker compose --env-file .env.production -f docker-compose.prod.yml \
 `.env.production` и повторите `./deploy/production.sh` — раздача вернётся на
 локальный диск.
 
+## Бэкапы PostgreSQL
+
+Два уровня:
+
+1. **Перед каждым деплоем** — `deploy/production.sh` снимает локальный
+   `pg_dump` в `backups/` (хранятся последние 7) — страховка на время миграций.
+2. **Ежедневно в S3** — `deploy/backup_db.sh` по cron хоста: дамп → gzip →
+   загрузка в `PG_BACKUP_S3_PREFIX` с проверкой размера.
+
+Настройка (один раз):
+
+```bash
+# awscli на хосте
+sudo apt install -y awscli
+
+# переменные в .env.production (ключи — те же статические, что для медиа,
+# или отдельный сервисный аккаунт с доступом только к бакету бэкапов):
+# PG_BACKUP_S3_PREFIX=s3://whiteboard-postgres/postgres/production
+# AWS_ENDPOINT=https://storage.yandexcloud.net
+# AWS_REGION=ru-central1
+# AWS_ACCESS_KEY_ID=YCA...
+# AWS_SECRET_ACCESS_KEY=YCP...
+
+# первый запуск вручную (проверка)
+./deploy/backup_db.sh
+
+# расписание — ежедневно в 03:30
+(crontab -l 2>/dev/null; echo "30 3 * * * $PWD/deploy/backup_db.sh >> /var/log/whiteboard-backup.log 2>&1") | crontab -
+
+# ротация в S3: либо lifecycle-правило в консоли Yandex (бакет -> Lifecycle ->
+# "Удалить объекты старше N дней"), либо флагом:
+#   ./deploy/backup_db.sh --prune-s3 30
+```
+
+Восстановление:
+
+```bash
+# свежий дамп с сервера или из S3
+aws s3 cp s3://whiteboard-postgres/postgres/production/db-YYYYMMDD-HHMMSS.sql.gz . \
+  --endpoint-url https://storage.yandexcloud.net
+
+docker compose --env-file .env.production -f docker-compose.prod.yml down db
+docker volume rm collaborative-whiteboard_postgres_prod_data   # ВНИМАНИЕ: стирает текущие данные
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d db
+gunzip -c db-YYYYMMDD-HHMMSS.sql.gz | docker compose --env-file .env.production \
+  -f docker-compose.prod.yml exec -T db psql -U whiteboard -d whiteboard
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+```
+
+Раз в месяц стоит прогонять восстановление на тестовой машине — бэкап, который
+не восстанавливали, не бэкап. WAL-G/PITR (потеря ≤ пары минут) имеет смысл
+только при соответствующих требованиях; для досок суточный дамп достаточен.
+
 ## JWT
 
 Ожидаются claims: `user_id` (обязательно), `exp` (обязательно), `username`

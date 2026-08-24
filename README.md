@@ -263,6 +263,47 @@ celery -A app.celery_app worker --loglevel=info
 - `UVICORN_WORKERS` — держите `1`, см. комментарий в `docker-compose.prod.yml`
   про sticky sessions
 
+## Медиа в S3 (Yandex Object Storage)
+
+Загруженные картинки после сжатия складываются в S3, а раздаются приложением
+по прежним ссылкам `/uploads/{board_id}/{file}` — фронтенд и данные доски не
+заметили переезда. Файлы в бакете можно держать приватными.
+
+- Если `MEDIA_S3_*` не заданы — работает локальный диск (`UPLOAD_DIR`), как раньше
+- Раздача: `GET /uploads/...` стримит из S3; локальная копия используется как
+  fallback для файлов до миграции
+- Новые файлы пишутся **только в S3**; сбой загрузки ретраится Celery, а не
+  теряется
+
+Включение и перенос старых файлов:
+
+```bash
+# 1) Создайте приватный bucket и статические ключи в Yandex Cloud,
+#    затем пропишите в .env.production:
+# MEDIA_S3_BUCKET=whiteboard-prod-media
+# MEDIA_S3_LOCATION=media
+# MEDIA_S3_ENDPOINT_URL=https://storage.yandexcloud.net
+# MEDIA_S3_REGION_NAME=ru-central1
+# MEDIA_S3_ACCESS_KEY_ID=YCA...
+# MEDIA_S3_SECRET_ACCESS_KEY=YCP...
+
+./deploy/production.sh   # пересборка с boto3 + zero-downtime переключение
+
+# 2) Миграция старых загрузок (идемпотентна: уже перенесённое пропускается)
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec whiteboard python scripts/migrate_uploads_to_s3.py --dry-run
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec whiteboard python scripts/migrate_uploads_to_s3.py
+
+# 3) После проверки досок можно освободить диск:
+docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec whiteboard python scripts/migrate_uploads_to_s3.py --delete-local
+```
+
+Пока шаг 3 не выполнен, откат тривиален: уберите `MEDIA_S3_*` из
+`.env.production` и повторите `./deploy/production.sh` — раздача вернётся на
+локальный диск.
+
 ## JWT
 
 Ожидаются claims: `user_id` (обязательно), `exp` (обязательно), `username`

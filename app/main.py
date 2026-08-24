@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from app.celery_app import celery_app
-from app.image_processing import process_and_store_image
+from app.image_processing import process_image_bytes
+from app.media.s3_storage import s3_enabled
 from app.tasks import process_image_task
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -198,10 +199,25 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+
+@app.get("/uploads/{board_id}/{filename}")
+def serve_upload(board_id: str, filename: str):
+    """Serve uploaded media.
+
+    Backing store is S3 when MEDIA_S3_* is configured, with the local uploads
+    dir as fallback for files that predate the migration (and as the primary
+    store in dev). URLs are immutable (uuid filenames) -> long cache lifetime.
+    """
+    from app.media.store import open_media
+
+    response = open_media(board_id, filename, UPLOAD_DIR)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return response
 
 # Raw uploads are staged here just long enough for the Celery worker to pick
-# them up (see /upload-image below) - kept outside the public /uploads mount
+# them up (see /upload-image below) - kept outside the public /uploads route
 # since these are pre-compression originals, not something to ever serve.
 PENDING_UPLOAD_DIR = UPLOAD_DIR / "_pending"
 PENDING_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -1343,8 +1359,23 @@ def _process_and_store_image(board_id: str, raw: bytes) -> tuple[str, int, int]:
     """Sync helper kept for the Miro-import path (see below), which processes
     a batch of images synchronously as part of one already-backgrounded admin
     operation. Interactive single-image uploads instead go through Celery -
-    see upload_image/upload_image_status."""
-    return process_and_store_image(UPLOAD_DIR, board_id, raw)
+    see upload_image/upload_image_status. Storage backend (S3/local) is picked
+    by app.media.store.persist_media / _persist_media_local."""
+    webp_bytes, width, height = process_image_bytes(raw)
+    filename = f"{uuid.uuid4().hex}.webp"
+    try:
+        from app.media.store import persist_media
+
+        url = persist_media(board_id, filename, webp_bytes)
+    except Exception:
+        if not s3_enabled():
+            # Dev without S3 config: keep the historical local-disk behavior.
+            from app.image_processing import save_processed_image
+
+            url = save_processed_image(UPLOAD_DIR, board_id, webp_bytes)
+        else:
+            raise
+    return url, width, height
 
 
 @app.post("/api/board/{board_id}/upload-image", status_code=202)
